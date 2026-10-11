@@ -6410,6 +6410,8 @@ def runtime_settings_view():
         "accounts_separate_tab": wb_settings.accounts_separate_tab(ACCOUNTS_DIR),
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
         "hidden_pages": wb_settings.hidden_pages(ACCOUNTS_DIR),
+        "agent_apply_prefs": wb_settings.agent_apply_prefs(ACCOUNTS_DIR),
+        "agents_remote_enabled": wb_settings.agents_remote_enabled(ACCOUNTS_DIR),
         "update_check_enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
@@ -12847,6 +12849,20 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_accounts_separate_tab(ACCOUNTS_DIR, raw)
             reply["accounts_separate_tab"] = raw
+        if "agent_apply_prefs" in payload:
+            # 智能体配置页的上次选择（网关地址 / Key / 默认模型）。setter 自己
+            # 做逐字段校验，坏形状静默忽略而不是 400：这是表单预填，存不上就
+            #当下次再填一遍，不值得让保存请求失败。
+            reply["agent_apply_prefs"] = wb_settings.set_agent_apply_prefs(
+                ACCOUNTS_DIR, payload.get("agent_apply_prefs"))
+        if "agents_remote_enabled" in payload:
+            # 智能体一键配置的远程开关：严格 JSON 布尔，与其他开关同款。
+            raw = payload.get("agents_remote_enabled")
+            if not isinstance(raw, bool):
+                return self._error(400, "agents_remote_enabled must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_agents_remote_enabled(ACCOUNTS_DIR, raw)
+            reply["agents_remote_enabled"] = raw
         if "key_before_hidden" in payload:
             # Same shape as accounts_collapsed: one disclosure state per
             # submission, and strictly a JSON boolean, because "false" as a
@@ -13004,8 +13020,21 @@ class Handler(BaseHTTPRequestHandler):
     # ---- one-click agent integration (wb_agents) ----
 
     def _agents_client_allowed(self):
-        """本请求的来源地址能不能用一键配置（判定见模块级 agents_client_allowed）。"""
-        return agents_client_allowed(getattr(self, "client_address", None))
+        """本请求的来源地址能不能用一键配置（判定见模块级 agents_client_allowed）。
+
+        设置页的「允许远程使用」打开后，非回环的看板会话也放行：客户端都装在
+        网关这台机器上、面板只是恰好从别的设备打开时，远程入口才有意义。
+        Docker / OpenWrt 部署仍一律关闭——配置目录在容器或路由器里，写了也
+        到不了用户电脑上的客户端。
+        """
+        if server_deployment_form():
+            return False
+        if agents_client_allowed(getattr(self, "client_address", None)):
+            return True
+        try:
+            return wb_settings.agents_remote_enabled(ACCOUNTS_DIR) is True
+        except Exception:
+            return False
 
     def _agents_base_url_hint(self):
         """Best guess at the URL a local client should point at.
@@ -13129,6 +13158,7 @@ class Handler(BaseHTTPRequestHandler):
             "enabled": True,
             "clients": list(wb_agents.overview(ACCOUNTS_DIR).values()),
             "models": self._agents_models(),
+            "prefs": wb_settings.agent_apply_prefs(ACCOUNTS_DIR),
             "keys": keys,
             "global_key_set": bool(API_KEY),
             "auth_required": auth_required(),

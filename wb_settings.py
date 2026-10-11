@@ -82,6 +82,14 @@ MAX_HIDDEN_PAGES = 32
 # hand-edited "false", a 1 or an object cannot split the nav by accident.
 ACCOUNTS_SEPARATE_TAB_KEY = "accounts_separate_tab"
 
+# 智能体一键配置页记住的上次选择：{base_url, key_id, model} 三个字符串。
+# 纯表单便利：缺键、存坏、类型不对都回落空串，绝不影响一键配置本身。
+AGENT_APPLY_PREFS_KEY = "agent_apply_prefs"
+
+# 智能体一键配置是否允许远程（非回环）的面板会话使用。默认关：issue #246 的
+# 门禁仍然成立；客户端都装在网关机器上、面板只是恰好从别的设备打开时才需要开。
+AGENTS_REMOTE_ENABLED_KEY = "agents_remote_enabled"
+
 # Instance-wide default UI language. The dashboard can override this per
 # browser with localStorage; this key is the fallback when no override exists.
 UI_LANGUAGE_KEY = "ui_language"
@@ -1320,6 +1328,61 @@ def set_accounts_separate_tab(accounts_dir, separate):
         data[ACCOUNTS_SEPARATE_TAB_KEY] = separate
         save(accounts_dir, data)
     return separate
+
+
+def agent_apply_prefs(accounts_dir):
+    """Last-used 智能体一键配置 selection: {base_url, key_id, model}.
+
+    三个字段都是字符串、都可为空；存的不是 dict、或字段不是字符串，一律
+    回落空串——这是表单预填的便利，坏数据只配被忽略，不配弄坏页面。
+    """
+    raw = load(accounts_dir).get(AGENT_APPLY_PREFS_KEY)
+    if not isinstance(raw, dict):
+        return {"base_url": "", "key_id": "", "model": ""}
+
+    def _clean(value):
+        return value.strip()[:500] if isinstance(value, str) else ""
+
+    return {"base_url": _clean(raw.get("base_url")),
+            "key_id": _clean(raw.get("key_id")),
+            "model": _clean(raw.get("model"))}
+
+
+def agents_remote_enabled(accounts_dir):
+    """Whether the agent one-click config may be used from a remote panel.
+
+    默认关（is True 归一化，与其他布尔开关同款）：手改的 "false"、1、对象都
+    保持关，只有显式的 true 打开。
+    """
+    return load(accounts_dir).get(AGENTS_REMOTE_ENABLED_KEY) is True
+
+
+def set_agents_remote_enabled(accounts_dir, enabled):
+    """Persist the remote-agent-config switch. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data[AGENTS_REMOTE_ENABLED_KEY] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def set_agent_apply_prefs(accounts_dir, prefs):
+    """Persist the agent-config form selection. Returns the stored dict.
+
+    只接受 string 字段、逐字段覆盖（一次提交可以只改一个），其余原样保留。
+    """
+    current = agent_apply_prefs(accounts_dir)
+    if isinstance(prefs, dict):
+        for key in ("base_url", "key_id", "model"):
+            value = prefs.get(key)
+            if isinstance(value, str):
+                current[key] = value.strip()[:500]
+    with _lock:
+        data = load(accounts_dir)
+        data[AGENT_APPLY_PREFS_KEY] = current
+        save(accounts_dir, data)
+    return current
 
 
 def update_check_enabled(accounts_dir):

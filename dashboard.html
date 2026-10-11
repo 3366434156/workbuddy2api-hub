@@ -1230,6 +1230,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '最低保留积分': 'Minimum reserved credits',
     '最大输出': 'Max output',
     '最快到期优先': 'Expiring soonest first',
+    '全部一键配置': 'One-click Setup All',
+    '允许远程使用': 'Allow remote access',
+    '已允许远程使用智能体一键配置': 'Remote agent setup enabled',
+    '已限制为仅本机使用': 'Agent setup restricted to localhost',
     '最近将过期': 'Expiring soonest',
     '最近请求': 'Recent requests',
     '有': '',
@@ -2181,6 +2185,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "账号当日消费的积分达到该值后，只允许请求免费模型（目录中标记为 x0.00 的模型），需要花费积分的模型自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示关闭（默认）。": "帳號當日消費的積分達到該值後，只允許請求免費模型（目錄中標記為 x0.00 的模型），需要花費積分的模型自動切到其他帳號；本地時間 0 點後自動恢復。填 0 表示關閉（預設）。",
     "账号「最早到期的积分包」（还有剩余、且到期会真正作废的那些）距今不超过该天数时，分派优先使用临期积分的账号——分到的流量更多、越接近到期份额越大，但不会全压在一个账号上（到期日相同或相近的账号彼此等权）；这些账号暂时都不可用（冷却、达日限额等）时，其他账号照常顶上。填 0 表示关闭；天数取自各账号最近一次刷新的积分数据。": "帳號「最早到期的積分包」（還有剩餘、且到期會真正作廢的那些）距今不超過該天數時，分派優先使用臨期積分的帳號——分到的流量更多、越接近到期份額越大，但不會全壓在一個帳號上（到期日相同或相近的帳號彼此等權）；這些帳號暫時都不可用（冷卻、達日限額等）時，其他帳號照常頂上。填 0 表示關閉；天數取自各帳號最近一次重新整理的積分資料。",
     "剩余用量优先调度": "剩餘用量優先排程",
+    "允许远程使用": "允許遠端使用",
     "按「剩余用量估算」优先调度：某 (账号 × 模型) 的估计剩余越接近耗尽，分到的请求越多——先把快用完的额度用掉，等它到点重置。剩余不到 30% 开始加权、5% 以内权重最高；没有预算样本、或剩余为 0 / 冷却中的组合不参与。默认关闭。": "按「剩餘用量估算」優先排程：某 (帳號 × 模型) 的估計剩餘越接近耗盡，分到的請求越多——先把快用完的額度用掉，等它到點重置。剩餘不到 30% 開始加權、5% 以內權重最高；沒有預算樣本、或剩餘為 0 / 冷卻中的組合不參與。預設關閉。",
     "注意：估算由撞线样本反推的预算与本地用量得出，本身有误差；开启后接近耗尽的账号会明显多接流量，也可能更早撞到上游限额（撞线后该模型停用到上游给出的恢复时刻）。": "注意：估算由撞線樣本反推的預算與本地用量得出，本身有誤差；開啟後接近耗盡的帳號會明顯多接流量，也可能更早撞到上游限額（撞線後該模型停用到上游給出的恢復時刻）。",
     "启用优先调度": "啟用優先排程",
@@ -3754,6 +3759,22 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       </section>
 
       <section>
+<h2 style="margin:0">智能体一键配置 <em id="setAgentsRemoteState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              智能体配置页检测的是网关所在机器的客户端，并把配置写到那台机器上。出于安全考虑它默认只在本机（localhost）打开的看板里出现；客户端都装在网关这台机器上、而你习惯从局域网其他设备打开面板时，打开下面的开关即可远程使用。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAgentsRemote" type="checkbox" style="width:16px;height:16px">
+              允许远程使用
+            </label>
+            <button onclick="saveAgentsRemote(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
 <h2 style="margin:0">更新 <em id="setUpdateState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               网关匿名查询 GitHub 的公开 Release 列表，与当前运行的版本比较。本版只检查：不下载、不安装、不重启，账号与用量数据不会被碰。
@@ -3815,6 +3836,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           <h2 style="margin:0">连接信息 <em id="agentConnState"></em></h2>
           <div style="font-size:12px;color:var(--dim);margin-top:4px">写入各客户端配置时使用的网关地址、鉴权 Key 与默认模型。</div>
         </div>
+        <button class="sec mini" onclick="applyAllAgents(this)" title="把下面的网关地址 / Key / 默认模型一次写入所有检测到的客户端">全部一键配置</button>
         <button class="sec mini" onclick="loadAgents(true)" title="重新检测本机客户端">刷新</button>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
@@ -8397,6 +8419,14 @@ async function loadSettings(showToast){
         remainingPriorityState.textContent = remainingPriority ? '(已启用)' : '(未启用)';
         remainingPriorityState.style.color = remainingPriority ? 'var(--accent2)' : 'var(--dim)';
       }
+      const agentsRemote = data.agents_remote_enabled === true;
+      const agentsRemoteInput = document.getElementById('setAgentsRemote');
+      if(agentsRemoteInput) agentsRemoteInput.checked = agentsRemote;
+      const agentsRemoteState = document.getElementById('setAgentsRemoteState');
+      if(agentsRemoteState){
+        agentsRemoteState.textContent = agentsRemote ? '(允许远程)' : '(仅本机)';
+        agentsRemoteState.style.color = agentsRemote ? 'var(--accent2)' : 'var(--dim)';
+      }
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
     API_KEY_ROWS = (data.api_keys || []).map(k => ({
@@ -8904,6 +8934,20 @@ async function saveLocalWebTools(btn){
   }
 }
 
+async function saveAgentsRemote(btn){
+  const el = document.getElementById('setAgentsRemote');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {agents_remote_enabled: value});
+    toast(value ? '已允许远程使用智能体一键配置' : '已限制为仅本机使用', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
 async function saveRemainingPriority(btn){
   const el = document.getElementById('setRemainingPriority');
   const value = !!(el && el.checked);
@@ -9799,12 +9843,14 @@ async function loadAgents(showToast){
 }
 
 function renderAgentConnForm(){
-  // 网关地址：只在用户还没改过时填默认值，避免刷新把用户编辑冲掉。
+  // 网关地址：优先用上次应用时记住的（agent_apply_prefs），其次默认值；
+  // 只在用户还没改过时填，避免刷新把用户编辑冲掉。
+  const prefs = (AGENTS_DATA && AGENTS_DATA.prefs) || {};
   const baseInput = document.getElementById('agentBaseUrl');
   if(baseInput && !baseInput.dataset.touched){
-    const def = (AGENTS_DATA && AGENTS_DATA.gateway && AGENTS_DATA.gateway.base_url)
+    baseInput.value = prefs.base_url
+      || (AGENTS_DATA && AGENTS_DATA.gateway && AGENTS_DATA.gateway.base_url)
       || (location.origin + '/v1');
-    baseInput.value = def;
   }
   const keySel = document.getElementById('agentKeySelect');
   if(keySel){
@@ -9817,7 +9863,8 @@ function renderAgentConnForm(){
         + '>' + esc(name) + (k.realm ? ' (' + esc(k.realm) + ')' : '') + '</option>';
     });
     keySel.innerHTML = html;
-    if(prev && keySel.querySelector('option[value="' + prev.replace(/"/g, '\\"') + '"]')) keySel.value = prev;
+    const wantKey = prev || prefs.key_id || '';
+    if(wantKey && keySel.querySelector('option[value="' + wantKey.replace(/"/g, '\\"') + '"]')) keySel.value = wantKey;
   }
   const modelSel = document.getElementById('agentModelSelect');
   if(modelSel){
@@ -9831,7 +9878,8 @@ function renderAgentConnForm(){
       html += '<option value="' + esc(id) + '">' + esc(label) + '</option>';
     });
     modelSel.innerHTML = html;
-    if(prev && modelSel.querySelector('option[value="' + prev.replace(/"/g, '\\"') + '"]')) modelSel.value = prev;
+    const wantModel = prev || prefs.model || '';
+    if(wantModel && modelSel.querySelector('option[value="' + wantModel.replace(/"/g, '\\"') + '"]')) modelSel.value = wantModel;
   }
 }
 
@@ -9962,6 +10010,7 @@ async function applyAgent(id, btn){
       toast('配置失败: ' + (r.message || (r.error && r.error.message) || '未知错误'), 'bad');
     } else {
       toast('已配置「' + (client.label || id) + '」，原配置已备份', 'ok');
+      agentPersistPrefs();
     }
   } catch(e) {
     if(!isAuthError(e)) toast('配置失败: ' + e.message, 'bad');
@@ -9971,6 +10020,50 @@ async function applyAgent(id, btn){
   }
 }
 
+async function applyAllAgents(btn){
+  const baseInput = document.getElementById('agentBaseUrl');
+  const baseUrl = baseInput ? baseInput.value.trim() : '';
+  if(!baseUrl){ toast('请先填写网关地址', 'warn'); return; }
+  const targets = agentClients().filter(c => (c.installed || c.detected));
+  if(!targets.length){ toast('没有检测到可配置的客户端', 'warn'); return; }
+  const changed = targets.filter(c => c.applied && c.applied.external_change);
+  if(changed.length && !confirm('有 ' + changed.length + ' 个客户端的配置在应用后被外部修改过（'
+    + changed.map(c => c.label || c.id).join('、')
+    + '），全部重新应用将覆盖这些改动。确定继续吗？')) return;
+  if(btn){ btn.disabled = true; }
+  let ok = 0, fail = 0;
+  try{
+    for(const c of targets){
+      try{
+        const r = await postJSON('/agents/apply', {
+          client: c.id,
+          client_id: c.id,
+          base_url: baseUrl,
+          key_id: (document.getElementById('agentKeySelect') || {}).value || '',
+          model: (document.getElementById('agentModelSelect') || {}).value || '',
+          models: (AGENT_MODELS || []).map(m => (typeof m === 'object' ? (m.id || '') : m)).filter(Boolean)
+        });
+        if(r && (r.ok === false || r.error)) fail++; else ok++;
+      }catch(e){ if(!isAuthError(e)) fail++; }
+    }
+  } finally {
+    if(btn){ btn.disabled = false; }
+    agentPersistPrefs();
+    await loadAgents();
+  }
+  toast('全部配置完成：成功 ' + ok + ' 个' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'warn' : 'ok');
+}
+function agentPersistPrefs(){
+  // 记住这次的选择，下次打开页面直接预填（服务端 accounts/settings.json）。
+  const baseInput = document.getElementById('agentBaseUrl');
+  const keySel = document.getElementById('agentKeySelect');
+  const modelSel = document.getElementById('agentModelSelect');
+  postJSON('/settings/save', {agent_apply_prefs: {
+    base_url: baseInput ? baseInput.value.trim() : '',
+    key_id: keySel ? keySel.value : '',
+    model: modelSel ? modelSel.value : '',
+  }}).catch(() => {});
+}
 async function restoreAgent(id, btn){
   const client = agentFindClient(id);
   const label = (client && (client.label || client.name)) || id;
