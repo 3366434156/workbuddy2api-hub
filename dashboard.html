@@ -1230,6 +1230,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '最低保留积分': 'Minimum reserved credits',
     '最大输出': 'Max output',
     '最快到期优先': 'Expiring soonest first',
+    '总剩余积分：全部账号（含停用）之和；「可用」只算启用且未触发限额护栏的账号': 'Total remaining credits: the sum over every account, disabled included; "available" counts only accounts that are enabled and not parked by a limit guard.',
     '最近将过期': 'Expiring soonest',
     '最近请求': 'Recent requests',
     '有': '',
@@ -2181,6 +2182,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "账号当日消费的积分达到该值后，只允许请求免费模型（目录中标记为 x0.00 的模型），需要花费积分的模型自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示关闭（默认）。": "帳號當日消費的積分達到該值後，只允許請求免費模型（目錄中標記為 x0.00 的模型），需要花費積分的模型自動切到其他帳號；本地時間 0 點後自動恢復。填 0 表示關閉（預設）。",
     "账号「最早到期的积分包」（还有剩余、且到期会真正作废的那些）距今不超过该天数时，分派优先使用临期积分的账号——分到的流量更多、越接近到期份额越大，但不会全压在一个账号上（到期日相同或相近的账号彼此等权）；这些账号暂时都不可用（冷却、达日限额等）时，其他账号照常顶上。填 0 表示关闭；天数取自各账号最近一次刷新的积分数据。": "帳號「最早到期的積分包」（還有剩餘、且到期會真正作廢的那些）距今不超過該天數時，分派優先使用臨期積分的帳號——分到的流量更多、越接近到期份額越大，但不會全壓在一個帳號上（到期日相同或相近的帳號彼此等權）；這些帳號暫時都不可用（冷卻、達日限額等）時，其他帳號照常頂上。填 0 表示關閉；天數取自各帳號最近一次重新整理的積分資料。",
     "剩余用量优先调度": "剩餘用量優先排程",
+    "总剩余积分：全部账号（含停用）之和；「可用」只算启用且未触发限额护栏的账号": "總剩餘積分：全部帳號（含停用）之和；「可用」只算啟用且未觸發限額護欄的帳號",
     "按「剩余用量估算」优先调度：某 (账号 × 模型) 的估计剩余越接近耗尽，分到的请求越多——先把快用完的额度用掉，等它到点重置。剩余不到 30% 开始加权、5% 以内权重最高；没有预算样本、或剩余为 0 / 冷却中的组合不参与。默认关闭。": "按「剩餘用量估算」優先排程：某 (帳號 × 模型) 的估計剩餘越接近耗盡，分到的請求越多——先把快用完的額度用掉，等它到點重置。剩餘不到 30% 開始加權、5% 以內權重最高；沒有預算樣本、或剩餘為 0 / 冷卻中的組合不參與。預設關閉。",
     "注意：估算由撞线样本反推的预算与本地用量得出，本身有误差；开启后接近耗尽的账号会明显多接流量，也可能更早撞到上游限额（撞线后该模型停用到上游给出的恢复时刻）。": "注意：估算由撞線樣本反推的預算與本地用量得出，本身有誤差；開啟後接近耗盡的帳號會明顯多接流量，也可能更早撞到上游限額（撞線後該模型停用到上游給出的恢復時刻）。",
     "启用优先调度": "啟用優先排程",
@@ -2850,8 +2852,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <div class="mono" style="font-size:11px;color:var(--dim);margin-bottom:8px">www.workbuddy.ai</div>
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px">
         <div style="display:flex;align-items:baseline;gap:6px">
-          <span id="tabIntlCredits" style="font-size:22px;font-weight:700;color:var(--accent2);letter-spacing:-.5px">0</span>
-          <span style="font-size:12px;color:var(--dim)">剩余积分 · <span id="tabIntlAccts" style="color:var(--fg);font-weight:600">0/0 可用</span></span>
+          <span id="tabIntlCredits" style="font-size:22px;font-weight:700;color:var(--accent2);letter-spacing:-.5px" title="总剩余积分：全部账号（含停用）之和；「可用」只算启用且未触发限额护栏的账号">0</span>
+          <span style="font-size:12px;color:var(--dim)">剩余积分 · <span id="tabIntlAvailCred" style="color:var(--fg);font-weight:600">可用 —</span> · <span id="tabIntlAccts" style="color:var(--fg);font-weight:600">0/0 账号</span></span>
         </div>
         <span id="tabIntlKeyBadge" class="badge s mini" style="font-weight:600">0 个 Key</span>
       </div>
@@ -2869,8 +2871,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <div class="mono" style="font-size:11px;color:var(--dim);margin-bottom:8px">copilot.tencent.com</div>
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px">
         <div style="display:flex;align-items:baseline;gap:6px">
-          <span id="tabCnCredits" style="font-size:22px;font-weight:700;color:var(--accent2);letter-spacing:-.5px">0</span>
-          <span style="font-size:12px;color:var(--dim)">剩余积分 · <span id="tabCnAccts" style="color:var(--fg);font-weight:600">0/0 可用</span></span>
+          <span id="tabCnCredits" style="font-size:22px;font-weight:700;color:var(--accent2);letter-spacing:-.5px" title="总剩余积分：全部账号（含停用）之和；「可用」只算启用且未触发限额护栏的账号">0</span>
+          <span style="font-size:12px;color:var(--dim)">剩余积分 · <span id="tabCnAvailCred" style="color:var(--fg);font-weight:600">可用 —</span> · <span id="tabCnAccts" style="color:var(--fg);font-weight:600">0/0 账号</span></span>
         </div>
         <span id="tabCnKeyBadge" class="badge warn mini" style="font-weight:600">0 个 Key</span>
       </div>
@@ -4334,29 +4336,46 @@ function updateUI(){
   const elCnKey = document.getElementById("tabCnKeyBadge");
   if(elCnKey) elCnKey.textContent = cnKeys + ' 个 Key';
 
-  // 左侧卡片账号数与积分统计
+  // 左侧卡片账号数与积分统计：大数字是「总剩余」（含停用账号），副行的
+  // 「可用」只算 isAcctActive（启用且未触发保留/限额护栏）的账号——与旁边
+  // 的 N/M 账号计数同一个口径，两个数字才有可比性。
   const allAccts = window.ACCOUNTS || [];
   const intlAccts = allAccts.filter(a => a.realm === 'intl' || !a.realm);
   const cnAccts = allAccts.filter(a => a.realm === 'cn');
 
-  let intlCred = 0, hasIntlCred = false;
-  intlAccts.forEach(a => { if(a.credits && a.credits.remain != null){ intlCred += a.credits.remain; hasIntlCred = true; } });
-  let cnCred = 0, hasCnCred = false;
-  cnAccts.forEach(a => { if(a.credits && a.credits.remain != null){ cnCred += a.credits.remain; hasCnCred = true; } });
-
   const isAcctActive = a => a.enabled && !a.reserveBlocked && !a.dailyLimitBlocked && !a.creditLimitReached;
+
+  let intlCred = 0, hasIntlCred = false, intlAvailCred = 0, hasIntlAvail = false;
+  intlAccts.forEach(a => {
+    if(a.credits && a.credits.remain != null){
+      intlCred += a.credits.remain; hasIntlCred = true;
+      if(isAcctActive(a)){ intlAvailCred += a.credits.remain; hasIntlAvail = true; }
+    }
+  });
+  let cnCred = 0, hasCnCred = false, cnAvailCred = 0, hasCnAvail = false;
+  cnAccts.forEach(a => {
+    if(a.credits && a.credits.remain != null){
+      cnCred += a.credits.remain; hasCnCred = true;
+      if(isAcctActive(a)){ cnAvailCred += a.credits.remain; hasCnAvail = true; }
+    }
+  });
+
   const intlActive = intlAccts.filter(isAcctActive).length;
   const cnActive = cnAccts.filter(isAcctActive).length;
 
   const elIntlCred = document.getElementById("tabIntlCredits");
   if(elIntlCred) elIntlCred.textContent = hasIntlCred ? fmt(intlCred) : "—";
+  const elIntlAvail = document.getElementById("tabIntlAvailCred");
+  if(elIntlAvail) elIntlAvail.innerHTML = '可用 <b style="color:var(--accent2)">' + (hasIntlAvail ? fmt(intlAvailCred) : "—") + '</b>';
   const elIntlAcct = document.getElementById("tabIntlAccts");
-  if(elIntlAcct) elIntlAcct.innerHTML = '<b style="color:var(--accent)">' + intlActive + '</b>/' + intlAccts.length + ' 可用';
+  if(elIntlAcct) elIntlAcct.innerHTML = '<b style="color:var(--accent)">' + intlActive + '</b>/' + intlAccts.length + ' 账号';
 
   const elCnCred = document.getElementById("tabCnCredits");
   if(elCnCred) elCnCred.textContent = hasCnCred ? fmt(cnCred) : "—";
+  const elCnAvail = document.getElementById("tabCnAvailCred");
+  if(elCnAvail) elCnAvail.innerHTML = '可用 <b style="color:var(--accent2)">' + (hasCnAvail ? fmt(cnAvailCred) : "—") + '</b>';
   const elCnAcct = document.getElementById("tabCnAccts");
-  if(elCnAcct) elCnAcct.innerHTML = '<b style="color:var(--accent)">' + cnActive + '</b>/' + cnAccts.length + ' 可用';
+  if(elCnAcct) elCnAcct.innerHTML = '<b style="color:var(--accent)">' + cnActive + '</b>/' + cnAccts.length + ' 账号';
 };
 
 // 切换视图的唯一入口：改完 VIEW_REALM 立刻用**已经加载好的**全量 window.ACCOUNTS
