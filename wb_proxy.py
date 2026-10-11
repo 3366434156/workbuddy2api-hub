@@ -15,6 +15,7 @@ start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
 import bisect
+import glob
 import hashlib
 import ipaddress
 from collections import deque
@@ -14657,6 +14658,74 @@ def running_version():
     """
     return Handler.server_version.split("/", 1)[-1]
 
+class SourceReloader(threading.Thread):
+    """源码变了就整进程重启——**默认关闭**，显式开启才生效。
+
+    重启会瞬断进行中的请求（秒级），所以这不是默认行为：需要它的人在
+    start 命令上加 --reload（或环境变量 WB_AUTO_RELOAD=1）。开启后轮询
+    脚本目录下 wb_*.py 与 dashboard.html 的 mtime；发现变化后再等一段
+    安静期，确认改动停稳了才重启——git pull 一次写十几个文件，不能写一半
+    就 exec。重启用 os.execv 原地换映像：同一个控制台、同一条命令行，重启
+    后的输出接着往下滚。账号与设置都在磁盘上，无状态可丢，内存里的冷却
+    计时会归零——那是重启本来的语义。新代码起不来（坏提交、语法错）时
+    窗口里就是那条 traceback 与 [server exited]，跟普通崩溃一样，不会带
+    着坏代码继续服务。
+
+    关闭方式：什么都不加（默认）。accounts/ 与 usage/ 不在监视范围，
+    运行数据怎么写都不会触发重启。
+    """
+
+    QUIET_SECONDS = 6.0
+    POLL_SECONDS = 2.0
+
+    def __init__(self):
+        super().__init__(daemon=True, name="source-reloader")
+
+    def snapshot(self):
+        root = os.path.dirname(os.path.abspath(sys.argv[0])) or "."
+        watched = []
+        for pattern in ("wb_*.py", "dashboard.html"):
+            watched.extend(glob.glob(os.path.join(root, pattern)))
+        state = {}
+        for path in watched:
+            try:
+                state[os.path.normcase(path)] = os.stat(path).st_mtime
+            except OSError:
+                pass
+        return state
+
+    @staticmethod
+    def enabled(args):
+        if getattr(args, "reload", False):
+            return True
+        return os.environ.get("WB_AUTO_RELOAD", "").strip().lower() in ("1", "on", "true")
+
+    def run(self):
+        script = os.path.abspath(sys.argv[0])
+        try:
+            current = self.snapshot()
+        except Exception:
+            return
+        while True:
+            time.sleep(self.POLL_SECONDS)
+            try:
+                now = self.snapshot()
+            except Exception:
+                continue
+            if now == current:
+                continue
+            # 改动还没停稳就继续等：安静期一过才认账，一次 pull 只重启一次。
+            quiet_deadline = time.time() + self.QUIET_SECONDS
+            while time.time() < quiet_deadline:
+                time.sleep(self.POLL_SECONDS)
+                newer = self.snapshot()
+                if newer != now:
+                    now = newer
+                    quiet_deadline = time.time() + self.QUIET_SECONDS
+            log("source changed, restarting to apply updates ...")
+            os.execv(sys.executable, [sys.executable, script] + sys.argv[1:])
+
+
 def main():
     args = _parse_cli_args()
     _apply_cli_overrides(args)
@@ -14689,6 +14758,9 @@ def _parse_cli_args():
                     help="where the per-account credential files live (default: ./accounts)")
     ap.add_argument("--import-desktop", action="store_true",
                     help="import the desktop app credential as an account, then exit")
+    ap.add_argument("--reload", action="store_true",
+                    help="enable the source-change auto restart (default: off - "
+                         "a restart drops in-flight requests)")
     ap.add_argument("--panel-password", default=None,
                     help="set the web panel password on startup (default: admin)")
     args = ap.parse_args()
@@ -14968,6 +15040,9 @@ def _serve_forever(args):
         _key_state = "off"
     log(f"listening  : http://{args.host}:{args.port}/v1  (api key: {_key_state})")
     log(f"dashboard  : http://{args.host}:{args.port}/")
+    if SourceReloader.enabled(args):
+        SourceReloader().start()
+        log("auto-reload: watching wb_*.py / dashboard.html (restart on change)")
     # Keep the handler referenced for the process lifetime: SetConsoleCtrlHandler
     # stores a raw pointer, so a collected callback would crash on close.
     _ctrl_handler = install_console_close_handler()
