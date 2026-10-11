@@ -8690,6 +8690,34 @@ def rate_limit_is_account_level(detail, reset_at):
     return credential_scope_phrase(detail) is not None
 
 
+#: 上游风控限制（HTTP 403, code 11140「账号存在异常行为，已被限制使用」）
+#: 的账号冷却时长：限制按小时计，2 小时后自然重试，上游解封即自愈——比
+#: 透传给客户端、账号继续被选用好，也比 402 那种「停到本地 04:00」轻。
+RESTRICTED_403_COOLDOWN = 7200.0
+
+#: 识别风控限制 403 的正文特征。内容审核的 403 走降级提示词那条路，二者必须
+#: 分开：对被限制的账号换提示词没有意义。code 匹配用正则（requestId 是 hex，
+#: 裸字符串 "11140" 可能撞上），措辞只收实测的限制用语，不猜。
+_RESTRICTED_403_CODE_RE = re.compile(r'"code"\s*:\s*"?11140"?')
+_RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已被限制")
+
+
+def restriction_is_account_level(detail):
+    """True when a 403 body says the ACCOUNT is restricted, not the content.
+
+    实测正文：{"code":11140,"msg":"request illegal",...,"displayMsg":{"en":
+    "Your account has been restricted due to unusual activity","zh":"账号存在
+    异常行为，已被限制使用"}}。en 在前 zh 在后，短截断也保得住 code 与 en；
+    拿不全的正文宁可漏判回内容审核路径，也不误判。
+    """
+    if not detail:
+        return False
+    if _RESTRICTED_403_CODE_RE.search(detail):
+        return True
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _RESTRICTION_403_MARKERS)
+
+
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
 
@@ -8939,9 +8967,24 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 continue
             if exc.code == 403:
                 try:
-                    detail = exc.read(400).decode("utf-8", "replace")
+                    detail = exc.read(600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
+                # 先分流：上游风控限制（code 11140「账号存在异常行为，已被限制
+                # 使用」）是账号级的坏，降级提示词救不了，透传给客户端只会让
+                # 一个被限制的账号把对话一次次打死。冷却这个账号、换下一个继
+                # 续；全都试完还是不行才把原因交给客户端。
+                if restriction_is_account_level(detail):
+                    account.note_error("HTTP 403 (account restricted)",
+                                       cooldown=RESTRICTED_403_COOLDOWN,
+                                       single_account=(total <= 1), detail=detail)
+                    log("account %s restricted by upstream (403 11140), "
+                        "cooling %.0fs" % (account.uid[:8], RESTRICTED_403_COOLDOWN))
+                    if session_key and POOL:
+                        POOL.affinity.demote(session_key, account.uid)
+                    last_error = exc
+                    last_403_detail = detail
+                    continue
                 # Panel degrade.go: a content rejection in passthrough/append
                 # mode is usually a system-prompt fingerprint false positive.
                 # Switch to the minimal neutral prompt until next 00:00 CST
@@ -8981,7 +9024,10 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                                    single_account=(total <= 1))
                 last_error = exc
                 continue
-            if exc.code in (500, 502, 503, 504):
+            if exc.code >= 500:
+                # 一切服务端 5xx（含上游自定义的 550 这类）都按瞬时故障轮转，
+                # 不在已知清单里的也不能把错误原样甩回客户端——换号是默认，
+                # 全试完才交出去。
                 transient_hits += 1
                 account.note_failure("HTTP %d" % exc.code)
                 log("upstream %s for '%s', retrying (fails=%d)"
