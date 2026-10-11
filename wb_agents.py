@@ -583,7 +583,123 @@ def _apply_opencode(paths, ctx):
     return {path: _dump_json(data)}
 
 
+def _dsh_has_patch_layer(home):
+    """新版 DSH 的标志：profiles/ 档案目录存在（旧版只有 settings.yaml）。"""
+    return os.path.isdir(os.path.join(home, ".dsh", "profiles"))
+
+
+def _dsh_patch_path(home):
+    """新版 DSH 的补丁层文件：profiles/<profile>/*.patch.yml。
+
+    新版把旧 settings.yaml 迁移进 profiles/<名字>/（本机实测旧文件被改名成
+    settings.yaml.imported）；没有补丁目录时返回 desktop 档的默认路径，首次
+    应用时创建。
+    """
+    profiles = os.path.join(home, ".dsh", "profiles")
+    try:
+        if os.path.isdir(profiles):
+            for name in sorted(os.listdir(profiles)):
+                pdir = os.path.join(profiles, name)
+                if not os.path.isdir(pdir):
+                    continue
+                cordis = os.path.join(pdir, "cordis.patch.yml")
+                if os.path.isfile(cordis):
+                    return cordis
+                for f in sorted(os.listdir(pdir)):
+                    if f.endswith(".patch.yml"):
+                        return os.path.join(pdir, f)
+    except OSError:
+        pass
+    return os.path.join(profiles, "desktop", "cordis.patch.yml")
+
+
+def _dsh_patch_entry_bounds(lines, entry_id):
+    """`- id: <entry_id>` 顶层条目的 [start, end) 行界，或 (None, None)。
+
+    end 指向下一个顶层 `- ` 条目或 EOF；条目内部的 models 子列表 `- id:` 都
+    带缩进，不会被误当成边界。
+    """
+    start = None
+    for i, line in enumerate(lines):
+        if start is None:
+            if line.rstrip() == "- id: " + entry_id:
+                start = i
+            continue
+        if line.startswith("- "):
+            return start, i
+    return (start, len(lines)) if start is not None else (None, None)
+
+
+def _dsh_patch_entry_upsert(lines, entry_id, name, config_keys, value_json):
+    """在 `- id: <entry_id>` 条目的 config.<config_keys> 下 upsert 一个键。
+
+    条目不存在就追加（- id / name / config: 三行骨架）；条目内的插入走
+    _yaml_upsert_at，条目外与条目内未触及的行逐字节保留。
+    """
+    start, end = _dsh_patch_entry_bounds(lines, entry_id)
+    if start is None:
+        lines = lines + ["- id: " + entry_id,
+                         '  name: "' + name + '"',
+                         "  config:"]
+        start, end = len(lines) - 3, len(lines)
+    return _yaml_upsert_at(lines, start, end, 2,
+                           ["config"] + list(config_keys), value_json)
+
+
+def _apply_dsh_patch(paths, ctx):
+    """新版 DSH（补丁层）：改 profiles/<profile>/cordis.patch.yml。
+
+    只动两个条目：llm-pi-ai（providers.<id>：baseURL / 模型清单）与
+    agent-default-model（provider / model）。API Key 与旧版同一条路——
+    apiKeyEnv 引用一个名字，真值写进 .credentials.yaml 的 refs 表。
+    """
+    patch_path = paths["patch"]
+    models = []
+    for entry in ctx.get("models") or []:
+        mid = entry.get("id")
+        if not mid:
+            continue
+        item = {"id": mid}
+        if entry.get("context_window"):
+            item["contextWindow"] = entry["context_window"]
+        models.append(item)
+    provider = {
+        "displayName": PROVIDER_NAME,
+        "apiKeyEnv": CREDENTIAL_REF,
+        "api": "openai-completions",
+        "baseURL": ctx["base_url_v1"],
+    }
+    if models:
+        provider["models"] = models
+    text = _read_text(patch_path) if os.path.isfile(patch_path) else ""
+    lines = text.split("\n") if text else []
+    lines = _dsh_patch_entry_upsert(lines, "llm-pi-ai",
+                                    "@deepseek-ai/dsh-llm-pi-ai",
+                                    ["providers", PROVIDER_ID],
+                                    json.dumps(provider, ensure_ascii=False))
+    if ctx.get("model"):
+        lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
+                                        "@deepseek-ai/dsh-agent-default-model",
+                                        ["provider"], json.dumps(PROVIDER_ID))
+        lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
+                                        "@deepseek-ai/dsh-agent-default-model",
+                                        ["model"], json.dumps(ctx["model"]))
+    cred_path = paths["credentials"]
+    cred_text = yaml_refs_upsert(_read_text(cred_path), CREDENTIAL_REF,
+                                 ctx["api_key"])
+    return {patch_path: "\n".join(lines), cred_path: cred_text}
+
+
 def _apply_dsh(paths, ctx):
+    # 新版 DSH 用 profiles/<profile>/*.patch.yml 补丁层；旧版才写 settings.yaml。
+    # paths 里带 patch 就只碰补丁 + 凭据，绝不再生成一份会被新版忽略的旧
+    # settings；补丁文件本身缺失（全新档案）就当空文件新建。
+    if "patch" in paths:
+        return _apply_dsh_patch(paths, ctx)
+    return _apply_dsh_legacy(paths, ctx)
+
+
+def _apply_dsh_legacy(paths, ctx):
     settings_path = paths["settings"]
     text = _read_text(settings_path)
     models = []
@@ -690,12 +806,13 @@ CLIENTS = {
     "dsh": {
         "id": "dsh",
         "label": "DeepSeek Harness",
-        "desc": "DSH; adds a wb-proxy provider to settings.yaml.",
+        "desc": "DSH; adds a wb-proxy provider (new patch layer or legacy settings.yaml).",
         "protocol": "openai",
-        "files": lambda home: {
-            "settings": os.path.join(home, ".dsh", "settings.yaml"),
-            "credentials": os.path.join(home, ".dsh", ".credentials.yaml"),
-        },
+        "files": lambda home: dict(
+            {"settings": os.path.join(home, ".dsh", "settings.yaml"),
+             "credentials": os.path.join(home, ".dsh", ".credentials.yaml")},
+            **({"patch": _dsh_patch_path(home)}
+               if _dsh_has_patch_layer(home) else {})),
         "probe": lambda home: (
             os.path.isdir(os.path.join(home, ".dsh"))
             or os.path.isfile(os.path.join(home, ".dsh", "settings.yaml"))
