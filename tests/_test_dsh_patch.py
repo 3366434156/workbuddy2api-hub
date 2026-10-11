@@ -112,10 +112,12 @@ class DshPatchTests(unittest.TestCase):
         text = self.read(self.patch)
         self.assertIn("- id: llm-pi-ai", text)
         self.assertIn("      wb-proxy:", text)
-        self.assertIn('"baseURL": "http://192.168.1.38:8788/v1"', text)
-        self.assertIn('"apiKeyEnv": "WB_PROXY_API_KEY"', text)
-        self.assertIn('"id": "glm-5.3"', text)
-        self.assertIn('"contextWindow": 1000000', text)
+        self.assertIn("        displayName: WB Proxy", text)
+        self.assertIn("        baseURL: http://192.168.1.38:8788/v1", text)
+        self.assertIn("        apiKeyEnv: WB_PROXY_API_KEY", text)
+        self.assertIn("          - id: glm-5.3", text)
+        self.assertIn("            contextWindow: 1000000", text)
+        self.assertIn("            reasoningEfforts:", text)
 
     def test_sibling_providers_are_preserved_byte_for_byte(self):
         before = self.read(self.patch)
@@ -128,8 +130,8 @@ class DshPatchTests(unittest.TestCase):
     def test_agent_default_model_follows_the_panel_choice(self):
         self.apply()
         text = self.read(self.patch)
-        self.assertIn('provider: "wb-proxy"', text)
-        self.assertIn('model: "glm-5.3"', text)
+        self.assertIn("    provider: wb-proxy", text)
+        self.assertIn("    model: glm-5.3", text)
         self.assertIn("    reasoningEffort: max", text)
 
     def test_missing_entries_are_appended(self):
@@ -140,7 +142,7 @@ class DshPatchTests(unittest.TestCase):
         self.assertIn("- id: llm-pi-ai", text)
         self.assertIn('  name: "@deepseek-ai/dsh-llm-pi-ai"', text)
         self.assertIn("- id: agent-default-model", text)
-        self.assertIn('model: "glm-5.3"', text)
+        self.assertIn("    model: glm-5.3", text)
         self.assertIn("    preference: dark", text)
 
     def test_credentials_ref_gets_the_key(self):

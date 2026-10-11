@@ -646,12 +646,122 @@ def _dsh_patch_entry_upsert(lines, entry_id, name, config_keys, value_json):
                            ["config"] + list(config_keys), value_json)
 
 
+def _yaml_scalar(value):
+    """Plain scalar，只在裸写会变义时才加引号（对齐 DSH 自己的无引号风格）。"""
+    s = str(value)
+    if s == "" or s != s.strip() or re.search(r"[:#]\s", s) \
+            or re.match(r"[-?:,\[\]{}#&*!|>'\"%@`]", s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def _dsh_provider_block(indent, provider_id, provider, models):
+    """wb-proxy provider 的块式 YAML，字段与形状对齐 DSH 自己序列化的样子。
+
+    本机实测：DSH 的补丁加载器不认行内 JSON（`wb-proxy: {...}`）——一键配置
+    写入 3 分钟后被 DSH 重写回原状，provider 不显示；而它自己保存的
+    providers 全是块式映射。模型字段对齐 wb 条目：id/name/contextWindow/
+    reasoningEfforts；maxTokens 与 input 没有可信来源，留空（同为可选：
+    gemini-3.1-pro-preview 与 glm-5.3 两个无此字段的条目照常工作）。
+    """
+    pad = " " * indent
+    lines = [pad + provider_id + ":"]
+    inner = pad + "  "
+    for key in ("displayName", "apiKeyEnv", "api", "baseURL"):
+        value = provider.get(key)
+        if value:
+            lines.append(inner + key + ": " + _yaml_scalar(value))
+    if models:
+        lines.append(inner + "models:")
+        for m in models:
+            lines.append(inner + "  - id: " + _yaml_scalar(m["id"]))
+            if m.get("name"):
+                lines.append(inner + "    name: " + _yaml_scalar(m["name"]))
+            if m.get("contextWindow"):
+                lines.append(inner + "    contextWindow: %d"
+                             % int(m["contextWindow"]))
+            lines.append(inner + "    reasoningEfforts:")
+            for level in ("low", "high", "max"):
+                lines.append(inner + "      %s: %s" % (level, level))
+    return lines
+
+
+def _dsh_entry_config_end(lines, start, end):
+    """entry 里 config: 块的 [行号, 结束) —— 结束即下一个顶层 `- ` 条目。"""
+    i = start
+    while i < end:
+        if lines[i].rstrip() == "  config:":
+            j = i + 1
+            while j < end:
+                l = lines[j]
+                if l.strip() and (len(l) - len(l.lstrip())) <= 2:
+                    break
+                j += 1
+            return i, j
+        i += 1
+    return None
+
+
+def _dsh_patch_providers_upsert(lines, entry_id, name, provider_id,
+                                provider, models):
+    """把 provider 块写进 `- id: llm-pi-ai` 的 config.providers 映射。
+
+    providers: 不存在就插到 config 块末尾；provider 键已存在（重复应用）就
+    整块替换；都不存在就在 providers 体末尾追加。条目外的行逐字节保留。
+    """
+    start, end = _dsh_patch_entry_bounds(lines, entry_id)
+    if start is None:
+        block = ["- id: " + entry_id, '  name: "' + name + '"',
+                 "  config:", "    providers:"]
+        block.extend(_dsh_provider_block(6, provider_id, provider, models))
+        return lines + block
+    cfg = _dsh_entry_config_end(lines, start, end)
+    assert cfg is not None, "llm-pi-ai entry has no config block"
+    cfg_line, cfg_end = cfg
+    prov = None
+    i = cfg_line + 1
+    while i < cfg_end:
+        if lines[i].rstrip() == "    providers:":
+            prov = i
+            break
+        i += 1
+    if prov is None:
+        lines[cfg_end:cfg_end] = (["    providers:"]
+                                  + _dsh_provider_block(6, provider_id,
+                                                        provider, models))
+        return lines
+    body_start = prov + 1
+    j = body_start
+    while j < cfg_end:
+        l = lines[j]
+        if l.strip() and (len(l) - len(l.lstrip())) <= 6:
+            break
+        j += 1
+    body_end = j
+    k = body_start
+    while k < body_end:
+        if lines[k].rstrip() == " " * 6 + provider_id + ":":
+            m = k + 1
+            while m < body_end:
+                l = lines[m]
+                if l.strip() and (len(l) - len(l.lstrip())) <= 6:
+                    break
+                m += 1
+            lines[k:m] = _dsh_provider_block(6, provider_id, provider, models)
+            return lines
+        k += 1
+    lines[body_end:body_end] = _dsh_provider_block(6, provider_id, provider,
+                                                   models)
+    return lines
+
+
 def _apply_dsh_patch(paths, ctx):
     """新版 DSH（补丁层）：改 profiles/<profile>/cordis.patch.yml。
 
     只动两个条目：llm-pi-ai（providers.<id>：baseURL / 模型清单）与
-    agent-default-model（provider / model）。API Key 与旧版同一条路——
-    apiKeyEnv 引用一个名字，真值写进 .credentials.yaml 的 refs 表。
+    agent-default-model（provider / model），一律**块式 YAML**——本机实测
+    行内 JSON 会被 DSH 的加载器丢弃。API Key 与旧版同一条路：apiKeyEnv
+    引用一个名字，真值写进 .credentials.yaml 的 refs 表。
     """
     patch_path = paths["patch"]
     models = []
@@ -659,31 +769,27 @@ def _apply_dsh_patch(paths, ctx):
         mid = entry.get("id")
         if not mid:
             continue
-        item = {"id": mid}
-        if entry.get("context_window"):
-            item["contextWindow"] = entry["context_window"]
-        models.append(item)
+        models.append({"id": mid, "name": mid,
+                       **({"contextWindow": int(entry["context_window"])}
+                          if entry.get("context_window") else {})})
     provider = {
         "displayName": PROVIDER_NAME,
         "apiKeyEnv": CREDENTIAL_REF,
         "api": "openai-completions",
         "baseURL": ctx["base_url_v1"],
     }
-    if models:
-        provider["models"] = models
     text = _read_text(patch_path) if os.path.isfile(patch_path) else ""
     lines = text.split("\n") if text else []
-    lines = _dsh_patch_entry_upsert(lines, "llm-pi-ai",
-                                    "@deepseek-ai/dsh-llm-pi-ai",
-                                    ["providers", PROVIDER_ID],
-                                    json.dumps(provider, ensure_ascii=False))
+    lines = _dsh_patch_providers_upsert(lines, "llm-pi-ai",
+                                        "@deepseek-ai/dsh-llm-pi-ai",
+                                        PROVIDER_ID, provider, models)
     if ctx.get("model"):
         lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
                                         "@deepseek-ai/dsh-agent-default-model",
-                                        ["provider"], json.dumps(PROVIDER_ID))
+                                        ["provider"], PROVIDER_ID)
         lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
                                         "@deepseek-ai/dsh-agent-default-model",
-                                        ["model"], json.dumps(ctx["model"]))
+                                        ["model"], ctx["model"])
     cred_path = paths["credentials"]
     cred_text = yaml_refs_upsert(_read_text(cred_path), CREDENTIAL_REF,
                                  ctx["api_key"])
