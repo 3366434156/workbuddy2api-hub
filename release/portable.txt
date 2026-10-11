@@ -27,9 +27,11 @@ dashboard.html
 start-wb-proxy.bat
 start-wb-proxy.command
 start-wb-proxy.sh
-start-wb-proxy-lan.bat
+restart-wb-proxy.bat
 start-wb-proxy-lan.command
+restart-wb-proxy.command
 start-wb-proxy-lan.sh
+restart-wb-proxy.sh
 allow-firewall.bat
 allow-firewall.command
 
