@@ -3046,6 +3046,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     <span class="toolbar-sep" aria-hidden="true"></span>
     <button class="sec" onclick="fetchCredits(this)">一键刷新积分</button>
     <button class="sec" onclick="refreshAccounts(this)" title="逐个刷新所有账号的上游访问凭证（相当于对每个账号点一次「刷新凭证」）">一键刷新凭证</button>
+    <button class="sec" onclick="testAllAccounts(this)" title="逐个账号按出站身份（WB/VSC/CLI）发一次最小请求：任一身分通过就留用并停在该身分；全部身分都失败且属于明确封号（凭证失效/风控限制）才自动停用，额度、积分、限流类失败不停用">一键测试全部</button>
     <span class="toolbar-sep" aria-hidden="true"></span>
     <button class="sec" id="btnCheckin" onclick="doCheckin(this)" style="display:none">Buddy 加油站签到</button>
     <button class="sec" id="btnDailyChat" onclick="doDailyChat(this)" style="display:none">每日活跃打卡 (国际版)</button>
@@ -3544,19 +3545,6 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     </section>
 
     <section>
-      <h2>面板窗口限高 <em id="setWinMaxHeightState"></em></h2>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
-        每个窗口（区块）超过这个高度时在窗口内部滚动，不再把整页拉长；滚动时标题行固定在窗口顶部。单位像素；填 0 表示不限。
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <span style="font-size:12px;color:var(--dim)">窗口最高高度（像素，0 = 不限）</span>
-        <input id="setWinMaxHeight" type="number" min="0" max="4000" step="20" value="640"
-               style="width:110px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--fg);font:inherit">
-        <button class="sec" onclick="saveWinMaxHeight(this)">保存</button>
-      </div>
-    </section>
-
-    <section>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div>
           <h2 style="margin:0">API Key <em id="setKeyState"></em></h2>
@@ -3900,6 +3888,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           <h2 style="margin:0">连接信息 <em id="agentConnState"></em></h2>
           <div style="font-size:12px;color:var(--dim);margin-top:4px">写入各客户端配置时使用的网关地址、鉴权 Key 与默认模型。</div>
         </div>
+        <button class="sec mini" onclick="applyAllAgents(this)" title="把下面的网关地址 / Key / 默认模型一次写入所有检测到的客户端">全部一键配置</button>
         <button class="sec mini" onclick="loadAgents(true)" title="重新检测本机客户端">刷新</button>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
@@ -4665,7 +4654,22 @@ async function loadIntlTasks(){
       intlTotalEl.textContent = '+' + fmt(totalAmt) + ' 积分';
     }
 
-    if(typeof updateTaskPageCheckinCards === 'function') updateTaskPageCheckinCards();
+    const stateEl = document.getElementById("intlTodayActiveState");
+    if(stateEl){
+      if(!accts.length){
+        stateEl.textContent = '无国际账号';
+      } else {
+        const today = new Date().toISOString().slice(0, 10);
+        const doneCount = accts.filter(a => a.lastDailyChat && a.lastDailyChat.startsWith(today)).length;
+        if(doneCount === accts.length){
+          stateEl.innerHTML = '<span style="color:#26bb82">今日已打卡 (' + doneCount + '/' + accts.length + ')</span>';
+        } else if(doneCount > 0){
+          stateEl.innerHTML = '<span style="color:var(--accent)">部分已打卡 (' + doneCount + '/' + accts.length + ')</span>';
+        } else {
+          stateEl.innerHTML = '<span style="color:var(--warn)">今日未打卡 (0/' + accts.length + ')</span>';
+        }
+      }
+    }
   }catch(e){
     console.error('loadIntlTasks error:', e);
   }
@@ -4694,7 +4698,32 @@ async function loadGrowthTasks(){
       sel.innerHTML = opts;
     }
 
-    if(typeof updateTaskPageCheckinCards === 'function') updateTaskPageCheckinCards();
+    const chkStateEl = document.getElementById("cnTodayCheckinState");
+    if(chkStateEl){
+      try{
+        const allAcctsRes = await getJSON('/accounts?realm=all');
+        const allList = allAcctsRes.accounts || [];
+        let targetAccts = allList.filter(a => a.realm === 'cn' && a.enabled);
+        if(CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all'){
+          targetAccts = targetAccts.filter(a => a.uid === CURRENT_GROWTH_UID);
+        }
+        if(!targetAccts.length){
+          chkStateEl.textContent = '无国内账号';
+        } else {
+          const today = new Date().toISOString().slice(0, 10);
+          const doneCount = targetAccts.filter(a => a.lastCheckin && a.lastCheckin.startsWith(today)).length;
+          if(doneCount === targetAccts.length){
+            chkStateEl.innerHTML = '<span style="color:#26bb82">今日已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
+          } else if(doneCount > 0){
+            chkStateEl.innerHTML = '<span style="color:var(--accent)">部分已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
+          } else {
+            chkStateEl.innerHTML = '<span style="color:var(--warn)">今日未签到 (0/' + targetAccts.length + ')</span>';
+          }
+        }
+      }catch(e){
+        chkStateEl.textContent = '-';
+      }
+    }
 
     const elStk = document.getElementById("stkDays");
     if(elStk) elStk.textContent = streak + ' 天';
@@ -5141,8 +5170,8 @@ function cellSortValue(cell, kind){
     case 's': return n * 1000;   // 换算到毫秒，好跟同一列里的 ms 比
     case 'K': return n * 1e3;
     case 'M': return n * 1e6;
+    case 'B': return n * 1e9;   // fmtCompact 用 B 表示十亿
     case 'G': return n * 1e9;
-    case 'B': return n * 1e9;   // fmtCompact 用 B 表示十亿，别让那一格按 1.5 排序
     default: return n;           // ms / % / 空 / 其它后缀（tok/s 之类）一律原值
   }
 }
@@ -5752,95 +5781,41 @@ function todayStamp(){
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
 
-// 一个账号今天的活动状态。
-// 国际版只有一项：今日活跃（daily_chat 流水或 lastDailyChat）。
-// 国内版有两项独立活动：
-//   1. Buddy 加油站（checkin 流水或 lastCheckin）
-//   2. 成长计划签到（连登活跃上报 lastActivityReport）
+// 一个账号今天的活动状态。label 按区域取（国内版叫签到，国际版叫活跃），
+// state 是四种互斥的结局之一。
 function activityStatusOf(a){
   const uid = String((a && a.uid) || '');
   const isCn = (a && a.realm) === 'cn';
-  if(!isCn){
-    const label = '今日活跃';
-    const done = a && a.lastDailyChat;
-    const event = ACTIVITY_TODAY.byUid[uid];
-    if(event){
-      return {kind: event.ok ? 'ok' : 'failed', label: label,
-              state: event.ok ? '成功' : '失败',
-              at: String(event.ts || '').replace('T', ' ').slice(0, 19),
-              message: String(event.message || '')};
-    }
-    if(done && String(done).startsWith(todayStamp())){
-      return {kind: 'done', label: label, state: '已完成', at: '', message: ''};
-    }
-    return {kind: 'none', label: label, state: '无记录', at: '', message: ''};
-  }
-
-  // 国内版：加油站
+  const label = isCn ? '今日签到' : '今日活跃';
+  const done = isCn ? (a && a.lastCheckin) : (a && a.lastDailyChat);
   const event = ACTIVITY_TODAY.byUid[uid];
-  const gasDone = a && a.lastCheckin;
-  let gas = {kind: 'none', label: '加油站', state: '未领', at: '', message: ''};
-  if(event && event.task === 'checkin'){
-    gas = {kind: event.ok ? 'ok' : 'failed', label: '加油站',
-           state: event.ok ? '已领' : '失败',
-           at: String(event.ts || '').replace('T', ' ').slice(0, 19),
-           message: String(event.message || '')};
-  } else if(gasDone && String(gasDone).startsWith(todayStamp())){
-    gas = {kind: 'done', label: '加油站', state: '已领', at: '', message: ''};
+  if(event){
+    return {kind: event.ok ? 'ok' : 'failed', label: label,
+            state: event.ok ? '成功' : '失败',
+            at: String(event.ts || '').replace('T', ' ').slice(0, 19),
+            message: String(event.message || '')};
   }
-
-  // 国内版：成长计划连登打卡
-  const streakDone = a && a.lastActivityReport;
-  let streak = {kind: 'none', label: '成长连登', state: '未打卡', at: '', message: ''};
-  if(streakDone && String(streakDone).startsWith(todayStamp())){
-    streak = {kind: 'done', label: '成长连登', state: '已打卡', at: String(streakDone), message: '连登活跃已上报'};
+  if(done && String(done).startsWith(todayStamp())){
+    return {kind: 'done', label: label, state: '已完成', at: '', message: ''};
   }
-
-  return {isCn: true, gas: gas, streak: streak,
-          // 整体是否算已完成（供任务页统计卡片判断）
-          kind: (gas.kind === 'ok' || gas.kind === 'done') ? 'done' : 'none'};
+  return {kind: 'none', label: label, state: '无记录', at: '', message: ''};
 }
 
 function activityStatusChip(a){
   const status = activityStatusOf(a);
+  // uid 来自上游 JWT：内联到属性里之前先按安全字符集收紧，和账号行其它按钮一致。
   const uidAttr = esc(String((a && a.uid) || '').replace(/[^\w.@-]/g, ''));
-  if(!status.isCn){
-    const cls = status.kind === 'ok' ? 'badge ok'
-              : status.kind === 'failed' ? 'badge bad'
-              : status.kind === 'done' ? 'badge ok' : 'badge off';
-    const tip = status.kind === 'none'
-      ? status.label + '：今天还没有记录（没有记录不等于失败）'
-      : (status.label + '：' + status.state
-         + (status.at ? ' · ' + status.at : '')
-         + (status.message ? ' · ' + status.message : ''));
-    return '<span class="' + cls + '" style="cursor:pointer" title="' + esc(tip) + '"'
-      + ' onclick="openActivityHistory(&quot;' + uidAttr + '&quot;)">'
-      + esc(status.label + ' · ' + status.state) + '</span>';
-  }
-
-  // 国内版双徽章渲染：主徽章保持「今日签到 · 成功/失败/已完成/无记录」，保证历史兼容；副徽章标明「成长计划」连登状态
-  const mainStatus = (status.gas.kind === 'ok') ? {cls: 'badge ok', text: '今日签到 · 成功', tip: status.gas.message}
-                   : (status.gas.kind === 'failed') ? {cls: 'badge bad', text: '今日签到 · 失败', tip: status.gas.message}
-                   : (status.gas.kind === 'done') ? {cls: 'badge ok', text: '今日签到 · 已完成', tip: ''}
-                   : {cls: 'badge off', text: '今日签到 · 无记录', tip: '今天还没有记录'};
-
-  const gasTip = 'Buddy加油站领取：' + (status.gas.state === '已领' ? '今日已领' : status.gas.state)
-               + (status.gas.at ? ' · ' + status.gas.at : '')
-               + (mainStatus.tip ? ' · ' + mainStatus.tip : '');
-
-  const stkCls = (status.streak.kind === 'done') ? 'badge ok' : 'badge off';
-  const stkTip = '成长计划连登活跃：' + status.streak.state
-               + (status.streak.at ? ' · ' + status.streak.at : '');
-
-  return '<div style="display:inline-flex;flex-direction:column;gap:4px;align-items:center">'
-    + '<span class="' + mainStatus.cls + '" style="cursor:pointer;white-space:nowrap" title="' + esc(gasTip) + '"'
+  const cls = status.kind === 'ok' ? 'badge ok'
+            : status.kind === 'failed' ? 'badge bad'
+            : status.kind === 'done' ? 'badge' : 'badge off';
+  const tip = status.kind === 'none'
+    ? status.label + '：今天还没有记录（没有记录不等于失败）'
+    : (status.label + '：' + status.state
+       + (status.at ? ' · ' + status.at : '')
+       + (status.message ? ' · ' + status.message : ''));
+  return '<span class="' + cls + '" style="cursor:pointer" title="' + esc(tip) + '"'
     + ' onclick="openActivityHistory(&quot;' + uidAttr + '&quot;)">'
-    + esc('Buddy 加油站 · ' + (status.gas.kind === 'none' ? '未领' : status.gas.state)) + '</span>'
-    + '<span class="' + stkCls + '" style="cursor:pointer;white-space:nowrap" title="' + esc(stkTip) + '"'
-    + ' onclick="openActivityHistory(&quot;' + uidAttr + '&quot;)">'
-    + esc('成长计划 · ' + (status.streak.kind === 'done' ? '已签到' : '未签到')) + '</span>'
-    + '</div>'
-    + '<span style="display:none">' + esc(mainStatus.text) + '</span>';
+    + esc(status.label + ' · ' + status.state) + '</span>';
 }
 
 // 今天的事件，按 uid 建表。rows 是最新在前，所以第一次见到的就是最近一次。
@@ -5859,57 +5834,6 @@ async function loadActivityToday(){
     ACTIVITY_TODAY = {byUid: {}, error: (e && e.message) || '读取失败', loaded: true};
   }
 }
-
-// 任务与福利页面的今日打卡/签到卡片状态：与网关与账号页面的今日活跃/今日签到完全同一口径
-// 统一通过 activityStatusOf(a) 判定（以今天真实流水为准，回落到本日本地时间前缀）。
-function updateTaskPageCheckinCards(){
-  const allList = window.ACCOUNTS || [];
-  const stateEl = document.getElementById("intlTodayActiveState");
-  if(stateEl){
-    const intlAccts = allList.filter(a => a.realm === 'intl' && a.enabled);
-    if(!intlAccts.length){
-      stateEl.textContent = '无国际账号';
-    } else {
-      const isDone = a => {
-        const s = activityStatusOf(a);
-        return s.kind === 'ok' || s.kind === 'done';
-      };
-      const doneCount = intlAccts.filter(isDone).length;
-      if(doneCount === intlAccts.length){
-        stateEl.innerHTML = '<span style="color:#26bb82">今日已打卡 (' + doneCount + '/' + intlAccts.length + ')</span>';
-      } else if(doneCount > 0){
-        stateEl.innerHTML = '<span style="color:var(--accent)">部分已打卡 (' + doneCount + '/' + intlAccts.length + ')</span>';
-      } else {
-        stateEl.innerHTML = '<span style="color:var(--warn)">今日未打卡 (0/' + intlAccts.length + ')</span>';
-      }
-    }
-  }
-
-  const chkStateEl = document.getElementById("cnTodayCheckinState");
-  if(chkStateEl){
-    let targetAccts = allList.filter(a => a.realm === 'cn' && a.enabled);
-    if(typeof CURRENT_GROWTH_UID !== 'undefined' && CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all'){
-      targetAccts = targetAccts.filter(a => a.uid === CURRENT_GROWTH_UID);
-    }
-    if(!targetAccts.length){
-      chkStateEl.textContent = '无国内账号';
-    } else {
-      const isDone = a => {
-        const s = activityStatusOf(a);
-        return s.kind === 'ok' || s.kind === 'done';
-      };
-      const doneCount = targetAccts.filter(isDone).length;
-      if(doneCount === targetAccts.length){
-        chkStateEl.innerHTML = '<span style="color:#26bb82">今日已领 (' + doneCount + '/' + targetAccts.length + ')</span>';
-      } else if(doneCount > 0){
-        chkStateEl.innerHTML = '<span style="color:var(--accent)">部分已领 (' + doneCount + '/' + targetAccts.length + ')</span>';
-      } else {
-        chkStateEl.innerHTML = '<span style="color:var(--warn)">今日未领 (0/' + targetAccts.length + ')</span>';
-      }
-    }
-  }
-}
-
 
 // 面板拼查询串，筛选在服务端做；写错的取值服务端会回 400，这里原样透出。
 function activityFilterQuery(){
@@ -6411,7 +6335,6 @@ async function loadActivityBoard(showToast, more){
 function renderAccounts(){
   // Same data source as the account cards, so the two views can never disagree.
   renderDisabled();
-  if(typeof updateTaskPageCheckinCards === 'function') updateTaskPageCheckinCards();
   const box = document.getElementById('accounts');
   const currentView = (window.VIEW_REALM || "intl");
   let list = accountsInView();
@@ -6629,6 +6552,25 @@ async function syncProfile(uid, btn){
     toast('同步失败: ' + e.message, 'bad');
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '同步昵称'; }
+  }
+}
+async function testAllAccounts(btn){
+  const label = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '批量测试中...'; }
+  try{
+    const r = await postJSON('/accounts/test-all', {});
+    const results = r.results || [];
+    const disabled = results.filter(x => x.disabled);
+    const ok = results.filter(x => x.ok);
+    toast('批量测试完成：共 ' + results.length + ' 个账号，正常 ' + ok.length
+      + '，自动停用 ' + disabled.length
+      + (disabled.length ? ('（' + disabled.map(x => x.nickname).join('、') + '）') : ''),
+      disabled.length ? 'warn' : 'ok');
+    await loadAccounts();
+  }catch(e){
+    if(!isAuthError(e)) toast('批量测试失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = label; }
   }
 }
 async function testAccount(uid, btn){
@@ -8781,11 +8723,7 @@ async function savePanelPassword(btn){
     document.getElementById('setPwdCurrent').value = '';
     document.getElementById('setPwdNew').value = '';
     toast('面板密码已更新', 'ok');
-    const pwdState = document.getElementById('setPwdState');
-    if(pwdState){
-      pwdState.textContent = (nw === 'admin') ? '(当前为默认密码)' : '(已自定义)';
-      pwdState.style.color = (nw === 'admin') ? 'var(--warn)' : 'var(--accent2)';
-    }
+    loadSettings();
   } catch(e) {
     toast('修改失败: ' + e.message, 'bad');
   } finally {
@@ -9305,6 +9243,21 @@ async function checkUpdateNow(btn){
     toast(data.update_available ? ('发现新版本 ' + data.latest_version) : '已是最新版本', 'ok');
   } catch(e) {
     toast('检查更新失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveAgentsRemote(btn){
+  const el = document.getElementById('setAgentsRemote');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {agents_remote_enabled: value});
+    toast(value ? '已允许远程使用智能体一键配置' : '已限制为仅本机使用', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
   } finally {
     if(btn) btn.disabled = false;
   }
@@ -10115,12 +10068,14 @@ async function loadAgents(showToast){
 }
 
 function renderAgentConnForm(){
-  // 网关地址：只在用户还没改过时填默认值，避免刷新把用户编辑冲掉。
+  // 网关地址：优先用上次应用时记住的（agent_apply_prefs），其次默认值；
+  // 只在用户还没改过时填，避免刷新把用户编辑冲掉。
+  const prefs = (AGENTS_DATA && AGENTS_DATA.prefs) || {};
   const baseInput = document.getElementById('agentBaseUrl');
   if(baseInput && !baseInput.dataset.touched){
-    const def = (AGENTS_DATA && AGENTS_DATA.gateway && AGENTS_DATA.gateway.base_url)
+    baseInput.value = prefs.base_url
+      || (AGENTS_DATA && AGENTS_DATA.gateway && AGENTS_DATA.gateway.base_url)
       || (location.origin + '/v1');
-    baseInput.value = def;
   }
   const keySel = document.getElementById('agentKeySelect');
   if(keySel){
@@ -10133,7 +10088,8 @@ function renderAgentConnForm(){
         + '>' + esc(name) + (k.realm ? ' (' + esc(k.realm) + ')' : '') + '</option>';
     });
     keySel.innerHTML = html;
-    if(prev && keySel.querySelector('option[value="' + prev.replace(/"/g, '\\"') + '"]')) keySel.value = prev;
+    const wantKey = prev || prefs.key_id || '';
+    if(wantKey && keySel.querySelector('option[value="' + wantKey.replace(/"/g, '\\"') + '"]')) keySel.value = wantKey;
   }
   const modelSel = document.getElementById('agentModelSelect');
   if(modelSel){
@@ -10147,7 +10103,8 @@ function renderAgentConnForm(){
       html += '<option value="' + esc(id) + '">' + esc(label) + '</option>';
     });
     modelSel.innerHTML = html;
-    if(prev && modelSel.querySelector('option[value="' + prev.replace(/"/g, '\\"') + '"]')) modelSel.value = prev;
+    const wantModel = prev || prefs.model || '';
+    if(wantModel && modelSel.querySelector('option[value="' + wantModel.replace(/"/g, '\\"') + '"]')) modelSel.value = wantModel;
   }
 }
 
@@ -10278,6 +10235,7 @@ async function applyAgent(id, btn){
       toast('配置失败: ' + (r.message || (r.error && r.error.message) || '未知错误'), 'bad');
     } else {
       toast('已配置「' + (client.label || id) + '」，原配置已备份', 'ok');
+      agentPersistPrefs();
     }
   } catch(e) {
     if(!isAuthError(e)) toast('配置失败: ' + e.message, 'bad');
@@ -10287,6 +10245,50 @@ async function applyAgent(id, btn){
   }
 }
 
+async function applyAllAgents(btn){
+  const baseInput = document.getElementById('agentBaseUrl');
+  const baseUrl = baseInput ? baseInput.value.trim() : '';
+  if(!baseUrl){ toast('请先填写网关地址', 'warn'); return; }
+  const targets = agentClients().filter(c => (c.installed || c.detected));
+  if(!targets.length){ toast('没有检测到可配置的客户端', 'warn'); return; }
+  const changed = targets.filter(c => c.applied && c.applied.external_change);
+  if(changed.length && !confirm('有 ' + changed.length + ' 个客户端的配置在应用后被外部修改过（'
+    + changed.map(c => c.label || c.id).join('、')
+    + '），全部重新应用将覆盖这些改动。确定继续吗？')) return;
+  if(btn){ btn.disabled = true; }
+  let ok = 0, fail = 0;
+  try{
+    for(const c of targets){
+      try{
+        const r = await postJSON('/agents/apply', {
+          client: c.id,
+          client_id: c.id,
+          base_url: baseUrl,
+          key_id: (document.getElementById('agentKeySelect') || {}).value || '',
+          model: (document.getElementById('agentModelSelect') || {}).value || '',
+          models: (AGENT_MODELS || []).map(m => (typeof m === 'object' ? (m.id || '') : m)).filter(Boolean)
+        });
+        if(r && (r.ok === false || r.error)) fail++; else ok++;
+      }catch(e){ if(!isAuthError(e)) fail++; }
+    }
+  } finally {
+    if(btn){ btn.disabled = false; }
+    agentPersistPrefs();
+    await loadAgents();
+  }
+  toast('全部配置完成：成功 ' + ok + ' 个' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'warn' : 'ok');
+}
+function agentPersistPrefs(){
+  // 记住这次的选择，下次打开页面直接预填（服务端 accounts/settings.json）。
+  const baseInput = document.getElementById('agentBaseUrl');
+  const keySel = document.getElementById('agentKeySelect');
+  const modelSel = document.getElementById('agentModelSelect');
+  postJSON('/settings/save', {agent_apply_prefs: {
+    base_url: baseInput ? baseInput.value.trim() : '',
+    key_id: keySel ? keySel.value : '',
+    model: modelSel ? modelSel.value : '',
+  }}).catch(() => {});
+}
 async function restoreAgent(id, btn){
   const client = agentFindClient(id);
   const label = (client && (client.label || client.name)) || id;

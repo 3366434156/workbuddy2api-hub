@@ -30,9 +30,18 @@ def spawn_managed(*args, **kwargs):
     """Popen a child in its own group/session, so stop_managed() can take its tree.
 
     Anything Popen accepts can be passed through; the two group flags are set here.
+    Tests always spawn with WB_AUTO_RELOAD=0: a suite that touches a source file
+    (or a checkout that changes mid-run) must not have its gateway re-exec out
+    from under it. Pass an explicit `env` to override.
     """
     kwargs.update({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
                   if os.name == "nt" else {"start_new_session": True})
+    env = kwargs.pop("env", None)
+    merged = dict(os.environ)
+    merged["WB_AUTO_RELOAD"] = "0"
+    if env:
+        merged.update(env)
+    kwargs["env"] = merged
     return subprocess.Popen(*args, **kwargs)
 
 

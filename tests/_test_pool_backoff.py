@@ -337,6 +337,12 @@ class PanelTestSuccessTests(unittest.TestCase):
             self.code, self.body = code, obj
             return code, obj
 
+        def _test_account_once(self, account, model):
+            # 一次测试的逻辑被拆成了 Handler._test_account_once；桩上直接
+            # 复用真实现——它只依赖 urlopen / aggregate_stream 这两个外部
+            # 依赖，本套件已经打桩。
+            return wb_proxy.Handler._test_account_once(self, account, model)
+
     class _Response(object):
         def __enter__(self):
             return self

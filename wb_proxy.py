@@ -15,6 +15,7 @@ start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
 import bisect
+import glob
 import hashlib
 import heapq
 import ipaddress
@@ -9715,12 +9716,12 @@ def runtime_settings_view():
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
         "remaining_priority_enabled":
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
-        "egress_backoff_enabled":
-            wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
         "accounts_collapsed": wb_settings.accounts_collapsed(ACCOUNTS_DIR),
         "accounts_separate_tab": wb_settings.accounts_separate_tab(ACCOUNTS_DIR),
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
         "hidden_pages": wb_settings.hidden_pages(ACCOUNTS_DIR),
+        "agent_apply_prefs": wb_settings.agent_apply_prefs(ACCOUNTS_DIR),
+        "agents_remote_enabled": wb_settings.agents_remote_enabled(ACCOUNTS_DIR),
         "update_check_enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
@@ -16716,6 +16717,20 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_accounts_separate_tab(ACCOUNTS_DIR, raw)
             reply["accounts_separate_tab"] = raw
+        if "agent_apply_prefs" in payload:
+            # 智能体配置页的上次选择（网关地址 / Key / 默认模型）。setter 自己
+            # 做逐字段校验，坏形状静默忽略而不是 400：这是表单预填，存不上就
+            #当下次再填一遍，不值得让保存请求失败。
+            reply["agent_apply_prefs"] = wb_settings.set_agent_apply_prefs(
+                ACCOUNTS_DIR, payload.get("agent_apply_prefs"))
+        if "agents_remote_enabled" in payload:
+            # 智能体一键配置的远程开关：严格 JSON 布尔，与其他开关同款。
+            raw = payload.get("agents_remote_enabled")
+            if not isinstance(raw, bool):
+                return self._error(400, "agents_remote_enabled must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_agents_remote_enabled(ACCOUNTS_DIR, raw)
+            reply["agents_remote_enabled"] = raw
         if "key_before_hidden" in payload:
             # Same shape as accounts_collapsed: one disclosure state per
             # submission, and strictly a JSON boolean, because "false" as a
@@ -16873,8 +16888,21 @@ class Handler(BaseHTTPRequestHandler):
     # ---- one-click agent integration (wb_agents) ----
 
     def _agents_client_allowed(self):
-        """本请求的来源地址能不能用一键配置（判定见模块级 agents_client_allowed）。"""
-        return agents_client_allowed(getattr(self, "client_address", None))
+        """本请求的来源地址能不能用一键配置（判定见模块级 agents_client_allowed）。
+
+        设置页的「允许远程使用」打开后，非回环的看板会话也放行：客户端都装在
+        网关这台机器上、面板只是恰好从别的设备打开时，远程入口才有意义。
+        Docker / OpenWrt 部署仍一律关闭——配置目录在容器或路由器里，写了也
+        到不了用户电脑上的客户端。
+        """
+        if server_deployment_form():
+            return False
+        if agents_client_allowed(getattr(self, "client_address", None)):
+            return True
+        try:
+            return wb_settings.agents_remote_enabled(ACCOUNTS_DIR) is True
+        except Exception:
+            return False
 
     def _agents_base_url_hint(self):
         """Best guess at the URL a local client should point at.
@@ -16998,6 +17026,7 @@ class Handler(BaseHTTPRequestHandler):
             "enabled": True,
             "clients": list(wb_agents.overview(ACCOUNTS_DIR).values()),
             "models": self._agents_models(),
+            "prefs": wb_settings.agent_apply_prefs(ACCOUNTS_DIR),
             "keys": keys,
             "global_key_set": bool(API_KEY),
             "auth_required": auth_required(),
@@ -17199,6 +17228,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_accounts_sync_profile(payload)
         if path == "/accounts/test":
             return self._route_accounts_test(payload)
+        if path == "/accounts/test-all":
+            return self._route_accounts_test_all(payload)
         if path == "/accounts/set":
             return self._route_accounts_set(payload)
         if path == "/accounts/product":
@@ -17680,6 +17711,10 @@ class Handler(BaseHTTPRequestHandler):
         if not account:
             return self._error(404, "no such account")
         test_model = payload.get("model") or "deepseek-v4.1-flash"
+        return self._json(200, self._test_account_once(account, test_model))
+
+    def _test_account_once(self, account, test_model):
+        """对一个账号按它当前的出站身份发一次最小请求，返回结果 dict。"""
         cfg = wb_accounts.get_realm_config(account.realm)
         chat_url = account.chat_base_url() + CHAT_PATH
         test_body = {
@@ -17712,13 +17747,13 @@ class Handler(BaseHTTPRequestHandler):
                 # path (revive_balance_cooldown on a credits refresh).
                 account.note_success(model=test_model)
                 log(f"account test: uid={account.uid[:8]} model={test_model} wall={wall_ms}ms ok=True", tag="accounts")
-                return self._json(200, {
+                return {
                     "ok": True,
                     "uid": account.uid,
                     "model": test_model,
                     "elapsed_ms": wall_ms,
                     "reply": reply_text,
-                })
+                }
         except urllib.error.HTTPError as exc:
             wall_ms = int((time.time() - t0) * 1000)
             detail = exc.read(400).decode("utf-8", "replace")
@@ -17726,24 +17761,86 @@ class Handler(BaseHTTPRequestHandler):
             # panel can show the whole upstream body on hover.
             account.note_error(f"HTTP {exc.code}: {detail[:80]}", cooldown=60, detail=detail)
             log(f"account test: uid={account.uid[:8]} model={test_model} wall={wall_ms}ms error={exc.code}", level="WARN", tag="accounts")
-            return self._json(200, {
+            return {
                 "ok": False,
                 "uid": account.uid,
                 "status": exc.code,
                 "error": f"HTTP {exc.code}: {detail[:150]}",
                 "elapsed_ms": wall_ms,
-            })
+            }
         except Exception as exc:
             wall_ms = int((time.time() - t0) * 1000)
             account.note_error(str(exc)[:80], cooldown=60)
             log(f"account test: uid={account.uid[:8]} model={test_model} wall={wall_ms}ms exc={exc}", level="WARN", tag="accounts")
-            return self._json(200, {
+            return {
                 "ok": False,
                 "uid": account.uid,
                 "status": 500,
                 "error": str(exc),
                 "elapsed_ms": wall_ms,
+            }
+
+    def _route_accounts_test_all(self, payload):
+        """批量测试全部启用的账号，并按结果自动停用。
+
+        每个账号按出站身份逐个试（当前身分优先，其余跟上），任一身分通过即
+        留用并停在该身分上；通过时清掉失败尝试留下的短冷却，让账号立刻可以
+        接单。全部身分都失败时，只有**明确封号类**失败（401 凭证失效 / 403
+        风控限制 code 11140）才自动停用——额度、积分、限流这类失败不停用：
+        它们会自己恢复，停用反而把账号藏起来了。已停用的账号不参与，也不
+        自动恢复。
+        """
+        test_model = payload.get("model") or "deepseek-v4.1-flash"
+        results = []
+        for account in [a for a in list(POOL.accounts) if a.enabled]:
+            original = account.product
+            tried = []
+            ok_product = None
+            for raw in wb_identity.VALID_PRODUCTS:
+                candidate = wb_identity.normalize_product(raw)
+                if any(t["product"] == candidate for t in tried):
+                    continue
+                account.product = candidate
+                r = self._test_account_once(account, test_model)
+                tried.append({"product": candidate, "ok": r["ok"],
+                              "status": r.get("status"),
+                              "error": r.get("error")})
+                if r["ok"]:
+                    ok_product = candidate
+                    break
+            if ok_product:
+                account.product = ok_product
+                account.clear_error()
+                disabled = False
+            else:
+                account.product = original
+                # 只停明确封号的：401（凭证失效）或风控限制正文。额度/积分/
+                # 限流/内容审核类失败不停——它们要么自己恢复，要么与账号无关。
+                banned = any(
+                    t.get("status") == 401
+                    or (t.get("status") == 403
+                        and restriction_is_account_level(t.get("error") or ""))
+                    for t in tried)
+                if banned:
+                    POOL.set_enabled(account.uid, False)
+                disabled = banned
+            account.save(ACCOUNTS_DIR)
+            log("account test-all: uid=%s product=%s disabled=%s"
+                % (account.uid[:8], ok_product or original, disabled),
+                level="WARN" if disabled else "INFO", tag="accounts")
+            results.append({
+                "uid": account.uid,
+                "nickname": account.nickname or account.uid[:8],
+                "ok": ok_product is not None,
+                "product": ok_product or original,
+                "disabled": disabled,
+                "tried": tried,
             })
+        return self._json(200, {
+            "results": results,
+            "total": len(results),
+            "disabled_count": sum(1 for r in results if r["disabled"]),
+        })
 
     def _route_accounts_set(self, payload):
         uid = payload.get("uid")
@@ -18592,6 +18689,74 @@ def running_version():
     """
     return Handler.server_version.split("/", 1)[-1]
 
+class SourceReloader(threading.Thread):
+    """源码变了就整进程重启——**默认关闭**，显式开启才生效。
+
+    重启会瞬断进行中的请求（秒级），所以这不是默认行为：需要它的人在
+    start 命令上加 --reload（或环境变量 WB_AUTO_RELOAD=1）。开启后轮询
+    脚本目录下 wb_*.py 与 dashboard.html 的 mtime；发现变化后再等一段
+    安静期，确认改动停稳了才重启——git pull 一次写十几个文件，不能写一半
+    就 exec。重启用 os.execv 原地换映像：同一个控制台、同一条命令行，重启
+    后的输出接着往下滚。账号与设置都在磁盘上，无状态可丢，内存里的冷却
+    计时会归零——那是重启本来的语义。新代码起不来（坏提交、语法错）时
+    窗口里就是那条 traceback 与 [server exited]，跟普通崩溃一样，不会带
+    着坏代码继续服务。
+
+    关闭方式：什么都不加（默认）。accounts/ 与 usage/ 不在监视范围，
+    运行数据怎么写都不会触发重启。
+    """
+
+    QUIET_SECONDS = 6.0
+    POLL_SECONDS = 2.0
+
+    def __init__(self):
+        super().__init__(daemon=True, name="source-reloader")
+
+    def snapshot(self):
+        root = os.path.dirname(os.path.abspath(sys.argv[0])) or "."
+        watched = []
+        for pattern in ("wb_*.py", "dashboard.html"):
+            watched.extend(glob.glob(os.path.join(root, pattern)))
+        state = {}
+        for path in watched:
+            try:
+                state[os.path.normcase(path)] = os.stat(path).st_mtime
+            except OSError:
+                pass
+        return state
+
+    @staticmethod
+    def enabled(args):
+        if getattr(args, "reload", False):
+            return True
+        return os.environ.get("WB_AUTO_RELOAD", "").strip().lower() in ("1", "on", "true")
+
+    def run(self):
+        script = os.path.abspath(sys.argv[0])
+        try:
+            current = self.snapshot()
+        except Exception:
+            return
+        while True:
+            time.sleep(self.POLL_SECONDS)
+            try:
+                now = self.snapshot()
+            except Exception:
+                continue
+            if now == current:
+                continue
+            # 改动还没停稳就继续等：安静期一过才认账，一次 pull 只重启一次。
+            quiet_deadline = time.time() + self.QUIET_SECONDS
+            while time.time() < quiet_deadline:
+                time.sleep(self.POLL_SECONDS)
+                newer = self.snapshot()
+                if newer != now:
+                    now = newer
+                    quiet_deadline = time.time() + self.QUIET_SECONDS
+            log("source changed, restarting to apply updates ...")
+            os.execv(sys.executable, [sys.executable, script] + sys.argv[1:])
+
+
 def main():
     args = _parse_cli_args()
     _apply_cli_overrides(args)
@@ -18624,14 +18789,16 @@ def _parse_cli_args():
                     help="where the per-account credential files live (default: ./accounts)")
     ap.add_argument("--import-desktop", action="store_true",
                     help="import the desktop app credential as an account, then exit")
+    ap.add_argument("--reload", action="store_true",
+                    help="enable the source-change auto restart (default: off - "
+                         "a restart drops in-flight requests)")
     ap.add_argument("--panel-password", default=None,
                     help="set the web panel password on startup (default: admin)")
     args = ap.parse_args()
     return args
 
 def _apply_cli_overrides(args):
-    global USAGE_DIR, USAGE_LOG, LIMIT_EVENTS_FILE, ESTIMATE_DAILY_FILE, \
-        RECENT_INDEX_FILE
+    global USAGE_DIR, USAGE_LOG, LIMIT_EVENTS_FILE, ESTIMATE_DAILY_FILE
     # LAN mode binds every interface. The key is generated below, once
     # ACCOUNTS_DIR is resolved, so it can be persisted and reused.
     if args.lan and args.host == "127.0.0.1":
@@ -18907,6 +19074,9 @@ def _serve_forever(args):
         _key_state = "off"
     log(f"listening  : http://{args.host}:{args.port}/v1  (api key: {_key_state})")
     log(f"dashboard  : http://{args.host}:{args.port}/")
+    if SourceReloader.enabled(args):
+        SourceReloader().start()
+        log("auto-reload: watching wb_*.py / dashboard.html (restart on change)")
     # Keep the handler referenced for the process lifetime: SetConsoleCtrlHandler
     # stores a raw pointer, so a collected callback would crash on close.
     _ctrl_handler = install_console_close_handler()

@@ -17,6 +17,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_agents as A
+import wb_settings
 
 PASS = FAIL = 0
 
@@ -805,6 +806,7 @@ class RemotePanel:
 
     client_address = ("192.168.1.20", 40000)
     _agents_client_allowed = wb_proxy.Handler._agents_client_allowed
+    _agents_base_url_hint = wb_proxy.Handler._agents_base_url_hint
 
     def _json(self, code, obj):
         self.response = (code, obj)
@@ -812,11 +814,26 @@ class RemotePanel:
 
 
 remote = RemotePanel()
+# 门禁读 accounts/settings.json 的 agents_remote_enabled：必须用隔离目录，
+# 不然宿主机上开着「允许远程使用」时这个用例会走到 _agents_models。
+remote_dir = tempfile.mkdtemp(prefix="agents-remote-")
+saved_accounts_dir = wb_proxy.ACCOUNTS_DIR
+wb_proxy.ACCOUNTS_DIR = remote_dir
 code_r, body_r = wb_proxy.Handler._get_agents(remote)
 check("a remote panel gets enabled:false from GET /agents",
       code_r == 200 and body_r.get("enabled") is False, body_r)
 check("the remote answer carries no client list and no model list",
       "clients" not in body_r and "models" not in body_r, body_r)
+
+# 允许远程使用打开后：同一个非回环来源拿到完整响应（客户端在网关机器上，
+# 面板只是恰好从别的设备打开）。上面的隔离目录里把开关写开。
+wb_settings.set_agents_remote_enabled(wb_proxy.ACCOUNTS_DIR, True)
+remote._agents_models = lambda: []
+code_on, body_on = wb_proxy.Handler._get_agents(remote)
+check("with agents_remote_enabled the same remote source gets the full answer",
+      code_on == 200 and body_on.get("enabled") is True and "clients" in body_on,
+      body_on)
+wb_proxy.ACCOUNTS_DIR = saved_accounts_dir
 
 proxy_src = open(os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
