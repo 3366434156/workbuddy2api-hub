@@ -24,4 +24,7 @@ powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Objec
 
 echo.
 echo Starting LAN mode ...
+rem 64MB request-body cap: a long agent conversation re-sends its whole
+rem history every turn, and 16MB chokes at ~100k tokens of context.
+set "WB_MAX_PAYLOAD_BYTES=67108864"
 call "%~dp0start-wb-proxy-lan.bat" %*
