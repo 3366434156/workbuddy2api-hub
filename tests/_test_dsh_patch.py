@@ -89,7 +89,9 @@ class DshPatchTests(unittest.TestCase):
             "credential_ref": wb_agents.CREDENTIAL_REF,
             "model": "glm-5.3",
             "models": [
-                {"id": "glm-5.3", "context_window": 1000000},
+                {"id": "glm-5.3", "context_window": 1000000,
+                 "reasoning_efforts": ["minimal", "low", "medium", "high",
+                                       "max"]},
                 {"id": "deepseek-v4.1-flash"},
             ],
         }
@@ -120,7 +122,9 @@ class DshPatchTests(unittest.TestCase):
         self.assertIn("        apiKeyEnv: WB_PROXY_API_KEY", text)
         self.assertIn("          - id: glm-5.3", text)
         self.assertIn("            contextWindow: 1000000", text)
+        # 思考档位来自网关宣告的 reasoning_efforts（照抄档位名）：
         self.assertIn("            reasoningEfforts:", text)
+        self.assertIn("              max: max", text)
 
     def test_sibling_providers_are_preserved_byte_for_byte(self):
         before = self.read(self.patch)

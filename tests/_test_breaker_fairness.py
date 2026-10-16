@@ -230,9 +230,19 @@ class TestAllRouteTests(unittest.TestCase):
     def _call(self, payload, rows, network):
         handler = types.SimpleNamespace(
             _json=lambda code, body: {"code": code, "body": body})
-        with mock.patch.object(P, "probe_account", lambda acc, model=None, timeout=30: dict(rows[0])), \
+        # 无 uid 的 /accounts/test 走聚合分支；probe 按行号轮转吐 rows。
+        seq = {"n": 0}
+
+        def probe(_acc, _model=None, timeout=30):
+            row = dict(rows[min(seq["n"], len(rows) - 1)]) if rows else \
+                {"uid": "x", "ok": False, "elapsed_ms": 0, "status": None,
+                 "reply": "", "error": "no rows", "network": False}
+            seq["n"] += 1
+            return row
+
+        with mock.patch.object(P, "probe_account", probe), \
                 mock.patch.object(P, "probe_local_network", lambda realm: dict(network)):
-            return P.Handler._route_accounts_test_all(handler, payload)
+            return P.Handler._route_accounts_test(handler, payload)
 
     def test_summary_and_rows(self):
         rows = [{"uid": self.account.uid, "nickname": "某账号", "realm": "cn", "model": "m",

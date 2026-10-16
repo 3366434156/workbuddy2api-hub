@@ -8,7 +8,7 @@
   3. 通过时清掉失败尝试留下的短冷却，账号立刻可以接单；
   4. 已停用的账号不参与。
 
-单次测试本身（_test_account_once）沿用既有实现，这里打桩替身，只验证批量
+单次测试本身（probe_account）沿用既有实现，这里打桩替身，只验证批量
 的编排：出站身份顺序、留用/停用决策与恢复行为。
 
 Run with the current interpreter (python tests/run_all.py batch).
@@ -74,21 +74,24 @@ class BatchTestTests(unittest.TestCase):
         P.ACCOUNTS_DIR = self.old_dir
 
     def route(self, accounts, script):
-        """打桩 Handler：_test_account_once 按脚本吐结果，_json 原样透传。"""
+        """打桩 probe_account 按脚本吐结果，_json 原样透传。"""
         P.POOL = StubPool(accounts)
         calls = {"n": 0}
         fake = types.SimpleNamespace(
-            _test_account_once=lambda account, model: script[calls["n"]],
             _json=lambda code, obj: obj,
         )
 
-        def next_result(account, model):
+        def next_result(account, model, timeout=30):
             r = script[min(calls["n"], len(script) - 1)]
             calls["n"] += 1
             return r
 
-        fake._test_account_once = next_result
-        return P.Handler._route_accounts_test_all(fake, {}), calls
+        old_probe = P.probe_account
+        P.probe_account = next_result
+        try:
+            return P.Handler._route_accounts_test_all(fake, {}), calls
+        finally:
+            P.probe_account = old_probe
 
     def test_first_product_pass_keeps_it_and_stops_early(self):
         a = make_account("b-pass", product="workbuddy")
@@ -160,13 +163,21 @@ class BatchTestTests(unittest.TestCase):
         # 通过后账号要能立刻接单：失败尝试留下的错误态必须被清掉。
         a = make_account("b-clear", product="workbuddy")
         P.POOL = StubPool([a])
+
+        def probe_by_product(account, model, timeout=30):
+            if account.product == "workbuddy":
+                return fail_result("b-clear")
+            return ok_result("b-clear")
+
         fake = types.SimpleNamespace(
-            _test_account_once=lambda account, model: (
-                fail_result("b-clear") if account.product == "workbuddy"
-                else ok_result("b-clear")),
             _json=lambda code, obj: obj,
         )
-        P.Handler._route_accounts_test_all(fake, {})
+        old_probe = P.probe_account
+        P.probe_account = probe_by_product
+        try:
+            P.Handler._route_accounts_test_all(fake, {})
+        finally:
+            P.probe_account = old_probe
         self.assertEqual(a.last_error, "", "通过后应清掉失败尝试的错误态")
         self.assertEqual(a.cooldown_until, 0.0, "通过后不应残留失败冷却")
 
