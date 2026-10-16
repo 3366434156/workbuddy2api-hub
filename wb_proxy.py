@@ -17036,27 +17036,28 @@ class Handler(BaseHTTPRequestHandler):
     def _agents_resolve_key(self, payload, warnings):
         """Pick the gateway key to hand to the client, per the payload.
 
-        Returns the key string, or None when the request should fail. The
-        failure message is appended to `warnings` only for the soft-fallback
-        case; hard failures raise via the caller's 400 mapping.
+        Returns ``(key, realm)``——realm 取所选 Key 绑定的出口（"" 表示跟随
+        面板切换），apply 侧用它派生 provider 的区域后缀，同一个客户端里
+        国内/国际两把 Key 各配一次即并存。硬失败照旧 raise；软回退把提示
+        附到 `warnings`。
         """
         key_id = str(payload.get("key_id") or "").strip()
         if key_id == "__global":
-            return API_KEY or None
+            return (API_KEY or None), ""
         keys = configured_keys()
         if key_id:
             for entry in keys:
                 if entry.get("id") == key_id:
-                    return entry.get("key") or None
+                    return (entry.get("key") or None), str(entry.get("realm") or "")
             raise wb_agents.AgentConfigError(
                 "no configured key with id %r" % key_id)
         # Default: the global key when set, else the first enabled panel key.
         if API_KEY:
-            return API_KEY
+            return API_KEY, ""
         for entry in keys:
             if entry.get("enabled"):
-                return entry.get("key") or None
-        return None
+                return (entry.get("key") or None), str(entry.get("realm") or "")
+        return None, ""
 
     def _handle_agents_apply(self, payload):
         wb_agents = agents_module()
@@ -17088,9 +17089,18 @@ class Handler(BaseHTTPRequestHandler):
                 cleaned_models.append({"id": item.strip()})
         warnings = []
         try:
-            api_key = self._agents_resolve_key(payload, warnings)
+            api_key, key_realm = self._agents_resolve_key(payload, warnings)
         except wb_agents.AgentConfigError as exc:
             return self._error(400, str(exc), "invalid_request_error")
+        # provider 条目的区域区分：显式 provider_label 优先；没给就用所选
+        # Key 的绑定出口（cn/intl），都空 = 单条目（跟随面板切换）。
+        provider_label = str(payload.get("provider_label") or "").strip().lower()
+        if provider_label in ("", "auto"):
+            provider_label = key_realm
+        if provider_label not in ("", "cn", "intl"):
+            return self._error(
+                400, "provider_label must be '', 'cn' or 'intl'",
+                "invalid_request_error")
         if not api_key:
             if auth_required():
                 return self._error(
@@ -17102,14 +17112,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = wb_agents.integrate(
                 ACCOUNTS_DIR, client_id, base_url, api_key,
-                model=model, models=cleaned_models)
+                model=model, models=cleaned_models,
+                provider_label=provider_label or None)
         except wb_agents.AgentConfigError as exc:
             return self._error(400, str(exc), "invalid_request_error")
         except Exception as exc:
             return self._error(500, "agents apply failed: %s" % exc)
         result["warnings"] = warnings
-        log("agents apply: client=%s base_url=%s model=%s files=%d"
-            % (client_id, base_url, model or "-", len(result.get("files") or [])),
+        log("agents apply: client=%s provider=%s base_url=%s model=%s files=%d"
+            % (client_id, result.get("provider_id") or "-",
+               base_url, model or "-", len(result.get("files") or [])),
             tag="agents")
         return self._json(200, result)
 

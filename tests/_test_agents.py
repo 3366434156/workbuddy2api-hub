@@ -651,7 +651,7 @@ class MockHandler:
         self.response = None
 
     def _agents_resolve_key(self, payload, warnings):
-        return "mock-key-123"
+        return "mock-key-123", ""
 
     def _agents_models(self):
         return [{"id": "model-fallback-1", "context_window": 128000},
@@ -668,8 +668,9 @@ class MockHandler:
 # Patch integrate and restore targets to use our isolated home10
 orig_integrate = A.integrate
 orig_restore = A.restore
-A.integrate = lambda acct, cid, base_url, key, model=None, models=None, home=None: \
-    orig_integrate(acct10, cid, base_url, key, model=model, models=models, home=home10)
+A.integrate = lambda acct, cid, base_url, key, model=None, models=None, home=None, provider_label=None: \
+    orig_integrate(acct10, cid, base_url, key, model=model, models=models, home=home10,
+                   provider_label=provider_label)
 A.restore = lambda acct, cid, home=None: \
     orig_restore(acct10, cid, home=home10)
 

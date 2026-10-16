@@ -2656,14 +2656,15 @@ def agent_apply_prefs(accounts_dir):
     """
     raw = load(accounts_dir).get(AGENT_APPLY_PREFS_KEY)
     if not isinstance(raw, dict):
-        return {"base_url": "", "key_id": "", "model": ""}
+        return {"base_url": "", "key_id": "", "model": "", "provider_label": ""}
 
     def _clean(value):
         return value.strip()[:500] if isinstance(value, str) else ""
 
     return {"base_url": _clean(raw.get("base_url")),
             "key_id": _clean(raw.get("key_id")),
-            "model": _clean(raw.get("model"))}
+            "model": _clean(raw.get("model")),
+            "provider_label": _clean(raw.get("provider_label"))}
 
 
 def agents_remote_enabled(accounts_dir):
@@ -2692,7 +2693,7 @@ def set_agent_apply_prefs(accounts_dir, prefs):
     """
     current = agent_apply_prefs(accounts_dir)
     if isinstance(prefs, dict):
-        for key in ("base_url", "key_id", "model"):
+        for key in ("base_url", "key_id", "model", "provider_label"):
             value = prefs.get(key)
             if isinstance(value, str):
                 current[key] = value.strip()[:500]

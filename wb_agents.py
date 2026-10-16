@@ -541,12 +541,13 @@ def _codex_home(home):
 
 def _apply_codex(paths, ctx):
     config_path = paths["config"]
+    provider_id = ctx["provider_id"]
     text = _read_text(config_path)
-    text = toml_upsert_top_key(text, "model_provider", PROVIDER_ID)
+    text = toml_upsert_top_key(text, "model_provider", provider_id)
     if ctx.get("model"):
         text = toml_upsert_top_key(text, "model", ctx["model"])
-    text = toml_upsert_table(text, "model_providers." + PROVIDER_ID, {
-        "name": PROVIDER_NAME,
+    text = toml_upsert_table(text, "model_providers." + provider_id, {
+        "name": ctx["provider_name"],
         "base_url": ctx["base_url_v1"],
         "wire_api": "responses",
         "env_key": "OPENAI_API_KEY",
@@ -559,6 +560,7 @@ def _apply_codex(paths, ctx):
 
 def _apply_opencode(paths, ctx):
     path = paths["config"]
+    provider_id = ctx["provider_id"]
     data = _load_json(path, "opencode config")
     if "$schema" not in data:
         data["$schema"] = "https://opencode.ai/config.json"
@@ -569,7 +571,7 @@ def _apply_opencode(paths, ctx):
             models[mid] = {}
     provider = {
         "npm": "@ai-sdk/openai-compatible",
-        "name": PROVIDER_NAME,
+        "name": ctx["provider_name"],
         "options": {
             "baseURL": ctx["base_url_v1"],
             "apiKey": ctx["api_key"],
@@ -577,9 +579,9 @@ def _apply_opencode(paths, ctx):
     }
     if models:
         provider["models"] = models
-    data = deep_merge(data, {"provider": {PROVIDER_ID: provider}})
+    data = deep_merge(data, {"provider": {provider_id: provider}})
     if ctx.get("model"):
-        data["model"] = "%s/%s" % (PROVIDER_ID, ctx["model"])
+        data["model"] = "%s/%s" % (provider_id, ctx["model"])
     return {path: _dump_json(data)}
 
 
@@ -764,6 +766,7 @@ def _apply_dsh_patch(paths, ctx):
     引用一个名字，真值写进 .credentials.yaml 的 refs 表。
     """
     patch_path = paths["patch"]
+    provider_id = ctx["provider_id"]
     models = []
     for entry in ctx.get("models") or []:
         mid = entry.get("id")
@@ -773,8 +776,8 @@ def _apply_dsh_patch(paths, ctx):
                        **({"contextWindow": int(entry["context_window"])}
                           if entry.get("context_window") else {})})
     provider = {
-        "displayName": PROVIDER_NAME,
-        "apiKeyEnv": CREDENTIAL_REF,
+        "displayName": ctx["provider_name"],
+        "apiKeyEnv": ctx["credential_ref"],
         "api": "openai-completions",
         "baseURL": ctx["base_url_v1"],
     }
@@ -782,16 +785,16 @@ def _apply_dsh_patch(paths, ctx):
     lines = text.split("\n") if text else []
     lines = _dsh_patch_providers_upsert(lines, "llm-pi-ai",
                                         "@deepseek-ai/dsh-llm-pi-ai",
-                                        PROVIDER_ID, provider, models)
+                                        provider_id, provider, models)
     if ctx.get("model"):
         lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
                                         "@deepseek-ai/dsh-agent-default-model",
-                                        ["provider"], PROVIDER_ID)
+                                        ["provider"], provider_id)
         lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
                                         "@deepseek-ai/dsh-agent-default-model",
                                         ["model"], ctx["model"])
     cred_path = paths["credentials"]
-    cred_text = yaml_refs_upsert(_read_text(cred_path), CREDENTIAL_REF,
+    cred_text = yaml_refs_upsert(_read_text(cred_path), ctx["credential_ref"],
                                  ctx["api_key"])
     return {patch_path: "\n".join(lines), cred_path: cred_text}
 
@@ -826,23 +829,24 @@ def _apply_dsh_legacy(paths, ctx):
         if entry.get("context_window"):
             item["contextWindow"] = entry["context_window"]
         models.append(item)
+    provider_id = ctx["provider_id"]
     provider = {
-        "displayName": PROVIDER_NAME,
-        "apiKeyEnv": CREDENTIAL_REF,
+        "displayName": ctx["provider_name"],
+        "apiKeyEnv": ctx["credential_ref"],
         "api": "openai-completions",
         "baseURL": ctx["base_url_v1"],
     }
     if models:
         provider["models"] = models
     text = yaml_upsert_inline(
-        text, "llm-pi-ai.providers.%s" % PROVIDER_ID, provider)
+        text, "llm-pi-ai.providers.%s" % provider_id, provider)
     if ctx.get("model"):
         text = yaml_upsert_inline(
             text, "agent-default-model",
-            {"provider": PROVIDER_ID, "model": ctx["model"]})
+            {"provider": provider_id, "model": ctx["model"]})
     credentials_path = paths["credentials"]
     cred_text = _read_text(credentials_path)
-    cred_text = yaml_refs_upsert(cred_text, CREDENTIAL_REF, ctx["api_key"])
+    cred_text = yaml_refs_upsert(cred_text, ctx["credential_ref"], ctx["api_key"])
     return {settings_path: text, credentials_path: cred_text}
 
 
@@ -861,13 +865,13 @@ def _apply_crush(paths, ctx):
             item["default_max_tokens"] = entry["max_output"]
         models.append(item)
     provider = {
-        "name": PROVIDER_NAME,
+        "name": ctx["provider_name"],
         "type": "openai",
         "base_url": ctx["base_url_v1"],
         "api_key": ctx["api_key"],
         "models": models,
     }
-    data = deep_merge(data, {"providers": {PROVIDER_ID: provider}})
+    data = deep_merge(data, {"providers": {ctx["provider_id"]: provider}})
     return {path: _dump_json(data)}
 
 
@@ -911,9 +915,10 @@ def _apply_zcode(paths, ctx):
         if mid and mid not in model_ids:
             model_ids.append(mid)
 
+    provider_id = ctx["provider_id"]
     rule = {
-        "providerId": PROVIDER_ID,
-        "providerName": PROVIDER_NAME,
+        "providerId": provider_id,
+        "providerName": ctx["provider_name"],
         "config": {
             "group": "standard-personal",
             "access": {"type": "api-key", "apiKey": ctx["api_key"]},
@@ -927,7 +932,7 @@ def _apply_zcode(paths, ctx):
 
     replaced = False
     for index, existing in enumerate(rules):
-        if isinstance(existing, dict) and existing.get("providerId") == PROVIDER_ID:
+        if isinstance(existing, dict) and existing.get("providerId") == provider_id:
             rules[index] = deep_merge(existing, rule)
             replaced = True
             break
@@ -938,8 +943,8 @@ def _apply_zcode(paths, ctx):
     if not isinstance(order, list):
         order = []
         config["providerOrder"] = order
-    if PROVIDER_ID not in order:
-        order.append(PROVIDER_ID)
+    if provider_id not in order:
+        order.append(provider_id)
     return {path: _dump_json(data)}
 
 
@@ -1102,7 +1107,8 @@ def overview(accounts_dir, home=None):
     return out
 
 
-def plan(client_id, base_url, api_key, model=None, models=None, home=None):
+def plan(client_id, base_url, api_key, model=None, models=None, home=None,
+         provider_label=None):
     """The exact file contents integrate() would write; touches nothing.
 
     Each entry in ``files`` carries the target ``path``, the new ``content``
@@ -1110,6 +1116,10 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None):
     apply - the CLI's --dry-run - before anything is backed up or written.
     integrate() and the preview share this one builder, so what a dry run
     prints is what a real run writes.
+
+    ``provider_label`` 区分同一客户端里的多个网关条目：传 "cn"/"intl" 时
+    provider 的 id/名称/凭据引用都带区域后缀（wb-proxy-cn / WB Proxy cn /
+    WB_PROXY_API_KEY_CN），两把 Key 各配一次即并存；None/空 维持原单条目。
     """
     client = _client(client_id)
     home = _resolve_home(home)
@@ -1117,12 +1127,25 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None):
     if not re.match(r"^https?://", base_url):
         raise AgentConfigError("base_url must start with http:// or https://")
     base_url_v1 = base_url if base_url.endswith("/v1") else base_url + "/v1"
+    suffix = ""
+    if provider_label:
+        label = str(provider_label).strip().lower()
+        if not re.match(r"^[a-z0-9-]{1,12}$", label):
+            raise AgentConfigError(
+                "provider_label must be 1-12 chars of [a-z0-9-]")
+        suffix = "-" + label
+        provider_name = PROVIDER_NAME + " " + label
+    else:
+        provider_name = PROVIDER_NAME
     ctx = {
         "base_url": base_url,
         "base_url_v1": base_url_v1,
         "api_key": str(api_key or ""),
         "model": str(model or "").strip() or None,
         "models": list(models or []),
+        "provider_id": PROVIDER_ID + suffix,
+        "provider_name": provider_name,
+        "credential_ref": CREDENTIAL_REF + suffix.upper().replace("-", "_"),
     }
     paths = client["files"](home)
     try:
@@ -1147,20 +1170,26 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None):
         "label": client["label"],
         "base_url": base_url,
         "model": ctx["model"],
+        "provider_id": ctx["provider_id"],
         "files": files,
     }
 
 
 def integrate(accounts_dir, client_id, base_url, api_key, model=None,
-              models=None, home=None):
+              models=None, home=None, provider_label=None):
     """Point `client_id` at this gateway; returns what was written.
 
     The first apply backs up the original bytes of every touched file; later
     applies keep the earliest backup so restore always returns to the state
-    before the very first integration.
+    before the very first integration. ``provider_label`` 透传给 plan()：
+    同一客户端配置多把 Key（国内/国际）时用区域后缀区分 provider 条目。
+
+    注意：state 按 client_id 记录、文件按 provider_id 寻址——两次不同
+    label 的 apply 各写各的 provider 块，state 只记最后一次；还原只回到
+    最初备份，这是既有语义。
     """
     built = plan(client_id, base_url, api_key, model=model, models=models,
-                 home=home)
+                 home=home, provider_label=provider_label)
     state = _load_state(accounts_dir)
     record = state.get(client_id) or {}
     previous_files = {entry.get("path"): entry

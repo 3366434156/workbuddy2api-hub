@@ -3907,8 +3907,19 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           <select id="agentModelSelect"
                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit"></select>
         </div>
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:12px;color:var(--dim);margin-bottom:4px">Provider 条目区分</div>
+          <select id="agentProviderLabel" onchange="agentPersistPrefs()"
+                  title="同一客户端想同时配置国内版与国际版两把 Key：各选对应 Key 配一次，条目名会带区域后缀（如 WB Proxy cn / wb-proxy-cn）互不覆盖。跟随面板切换的 Key 选「无后缀」写进同一个条目。"
+                  style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+            <option value="auto">自动（按 Key 的出口）</option>
+            <option value="cn">国内版（-cn）</option>
+            <option value="intl">国际版（-intl）</option>
+            <option value="">无后缀（单条目）</option>
+          </select>
+        </div>
       </div>
-      <div style="font-size:12px;color:var(--dim);margin-top:10px">「全局 API Key」表示不在客户端配置里写入具体 Key，客户端沿用网关当前生效的全局 Key。</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:10px">「全局 API Key」表示不在客户端配置里写入具体 Key，客户端沿用网关当前生效的全局 Key。想同时用国内/国际两把 Key：选一把配一次（条目区分=自动），再选另一把配一次，两个 provider 条目并存、客户端里手动切换。</div>
     </section>
 
     <section>
@@ -10077,6 +10088,10 @@ function renderAgentConnForm(){
       || (AGENTS_DATA && AGENTS_DATA.gateway && AGENTS_DATA.gateway.base_url)
       || (location.origin + '/v1');
   }
+  const labelSel = document.getElementById('agentProviderLabel');
+  if(labelSel && !labelSel.dataset.touched && prefs.provider_label !== undefined){
+    labelSel.value = prefs.provider_label || 'auto';
+  }
   const keySel = document.getElementById('agentKeySelect');
   if(keySel){
     const prev = keySel.value;
@@ -10228,6 +10243,7 @@ async function applyAgent(id, btn){
       client_id: id,
       base_url: baseUrl,
       key_id: keySel ? keySel.value : '',
+      provider_label: (document.getElementById('agentProviderLabel') || {}).value || 'auto',
       model: modelSel ? modelSel.value : '',
       models: (AGENT_MODELS || []).map(m => (typeof m === 'object' ? (m.id || '') : m)).filter(Boolean)
     });
@@ -10265,6 +10281,7 @@ async function applyAllAgents(btn){
           client_id: c.id,
           base_url: baseUrl,
           key_id: (document.getElementById('agentKeySelect') || {}).value || '',
+          provider_label: (document.getElementById('agentProviderLabel') || {}).value || 'auto',
           model: (document.getElementById('agentModelSelect') || {}).value || '',
           models: (AGENT_MODELS || []).map(m => (typeof m === 'object' ? (m.id || '') : m)).filter(Boolean)
         });
@@ -10287,6 +10304,7 @@ function agentPersistPrefs(){
     base_url: baseInput ? baseInput.value.trim() : '',
     key_id: keySel ? keySel.value : '',
     model: modelSel ? modelSel.value : '',
+    provider_label: (document.getElementById('agentProviderLabel') || {}).value || '',
   }}).catch(() => {});
 }
 async function restoreAgent(id, btn){

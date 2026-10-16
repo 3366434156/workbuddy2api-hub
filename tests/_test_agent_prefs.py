@@ -24,14 +24,15 @@ class AgentApplyPrefsTests(unittest.TestCase):
 
     def test_defaults_are_empty_strings(self):
         self.assertEqual(wb_settings.agent_apply_prefs(self.dir),
-                         {"base_url": "", "key_id": "", "model": ""})
+                         {"base_url": "", "key_id": "", "model": "",
+                          "provider_label": ""})
 
     def test_round_trip_and_partial_update(self):
         wb_settings.set_agent_apply_prefs(self.dir, {
             "base_url": "http://192.168.1.38:8788/v1", "key_id": "k1"})
         self.assertEqual(wb_settings.agent_apply_prefs(self.dir),
                          {"base_url": "http://192.168.1.38:8788/v1",
-                          "key_id": "k1", "model": ""})
+                          "key_id": "k1", "model": "", "provider_label": ""})
         # 一次只改一个字段，其余保留
         wb_settings.set_agent_apply_prefs(self.dir, {"model": "glm-5.3"})
         self.assertEqual(wb_settings.agent_apply_prefs(self.dir)["model"], "glm-5.3")

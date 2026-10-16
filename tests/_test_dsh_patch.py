@@ -84,6 +84,9 @@ class DshPatchTests(unittest.TestCase):
             "base_url": "http://192.168.1.38:8788",
             "base_url_v1": "http://192.168.1.38:8788/v1",
             "api_key": "wb-test-key",
+            "provider_id": wb_agents.PROVIDER_ID,
+            "provider_name": wb_agents.PROVIDER_NAME,
+            "credential_ref": wb_agents.CREDENTIAL_REF,
             "model": "glm-5.3",
             "models": [
                 {"id": "glm-5.3", "context_window": 1000000},
