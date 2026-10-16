@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 
@@ -844,6 +845,86 @@ check("wb_proxy no longer imports wb_agents at module level",
 check("wb_agents is imported lazily inside agents_module()",
       "def agents_module()" in proxy_src and "        import wb_agents" in proxy_src)
 
+print()
+print("[29] credential files land owner-only (issue #345)")
+
+# 本模块写出的每个文件都带网关 API Key（明文内联，或由同目录凭据文件解析的
+# env 引用），所以 apply 不能让它们 group/world 可读：DSH 遇到 0644 的凭据文件
+# 直接拒绝启动，而且用户手动 chmod 600 之后再次配置不能被改回宽松。
+home16 = tempfile.mkdtemp(prefix="wb-agents-cred-")
+acct16 = tempfile.mkdtemp(prefix="wb-agents-cred-acct-")
+
+
+def mode_of(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+A.integrate(acct16, "dsh", "http://127.0.0.1:8788/v1", "key", home=home16)
+cred16 = os.path.join(home16, ".dsh", ".credentials.yaml")
+settings16 = os.path.join(home16, ".dsh", "settings.yaml")
+
+if os.name == "posix":
+    check("a fresh DSH credentials file is 0600",
+          mode_of(cred16) == 0o600, "%04o" % mode_of(cred16))
+    check("its sibling settings.yaml is 0600 too",
+          mode_of(settings16) == 0o600, "%04o" % mode_of(settings16))
+
+    A.integrate(acct16, "dsh", "http://127.0.0.1:8788/v1", "key", home=home16)
+    check("re-applying leaves an already 0600 credentials file alone",
+          mode_of(cred16) == 0o600, "%04o" % mode_of(cred16))
+
+    os.chmod(cred16, 0o644)
+    A.integrate(acct16, "dsh", "http://127.0.0.1:8788/v1", "key", home=home16)
+    check("a 0644 file left by an older build is tightened to 0600",
+          mode_of(cred16) == 0o600, "%04o" % mode_of(cred16))
+
+    os.chmod(cred16, 0o400)
+    A.integrate(acct16, "dsh", "http://127.0.0.1:8788/v1", "key", home=home16)
+    check("a stricter 0400 the user chose is kept, never widened",
+          mode_of(cred16) == 0o400, "%04o" % mode_of(cred16))
+    os.chmod(cred16, 0o600)
+
+    A.integrate(acct16, "codex", "http://127.0.0.1:8788/v1", "key", home=home16)
+    check("codex auth.json is 0600",
+          mode_of(os.path.join(home16, ".codex", "auth.json")) == 0o600)
+    A.integrate(acct16, "opencode", "http://127.0.0.1:8788/v1", "key",
+                home=home16)
+    check("opencode's config with an inline apiKey is 0600",
+          mode_of(os.path.join(home16, ".config", "opencode",
+                               "opencode.json")) == 0o600)
+
+    # 备份保存的是原文件字节（同样可能含 Key），也必须 owner-only。
+    crush_dir = os.path.join(home16, ".config", "crush")
+    os.makedirs(crush_dir, exist_ok=True)
+    with open(os.path.join(crush_dir, "crush.json"), "w",
+              encoding="utf-8") as fh:
+        fh.write("{}\n")
+    A.integrate(acct16, "crush", "http://127.0.0.1:8788/v1", "key",
+                home=home16)
+    bdir16 = os.path.join(acct16, A.BACKUP_DIRNAME, "crush")
+    backups16 = [os.path.join(bdir16, n) for n in os.listdir(bdir16)]
+    check("the backup of the original file is 0600 as well",
+          bool(backups16) and all(mode_of(p) == 0o600 for p in backups16),
+          [(p, "%04o" % mode_of(p)) for p in backups16])
+
+    A.restore(acct16, "crush", home=home16)
+    check("restore writes the file back owner-only",
+          mode_of(os.path.join(crush_dir, "crush.json")) == 0o600)
+else:
+    # Windows has no POSIX mode bits, so assert the mode we *ask for* is 0600
+    # rather than open()'s 0666 & ~umask.
+    seen16 = []
+    real_chmod = os.chmod
+    os.chmod = lambda p, m, *a, **k: seen16.append((p, m))
+    try:
+        A.integrate(acct16, "codex", "http://127.0.0.1:8788/v1", "key",
+                    home=home16)
+    finally:
+        os.chmod = real_chmod
+    auth16 = os.path.join(home16, ".codex", "auth.json")
+    check("a fresh credentials write asks for 0600",
+          (auth16 + ".tmp", 0o600) in seen16, seen16)
+
 # ---------------------------------------------------------------------------
 # cleanup
 # ---------------------------------------------------------------------------
@@ -851,9 +932,21 @@ check("wb_agents is imported lazily inside agents_module()",
 for d in (home, accounts, home2, acct2, home3, acct3, home4, acct4,
           home5, acct5, home6, acct6, home7, acct7, home8, acct8,
           home9, acct9, home10, acct10, home11, acct11, home12, acct12,
-          home13, acct13, home14, acct14, home15, acct15, home_paths):
+          home13, acct13, home14, acct14, home15, acct15, home16, acct16,
+          home_paths):
     shutil.rmtree(d, ignore_errors=True)
 
 print()
+print()
+print("[30] _agents_resolve_key raises AgentConfigError on non-existent key (issue #352)")
+import wb_proxy as P
+handler = P.Handler.__new__(P.Handler)
+wb_agents = P.agents_module()
+try:
+    handler._agents_resolve_key({"key_id": "definitely-not-a-key"}, [])
+    check("should have raised AgentConfigError", False)
+except Exception as exc:
+    check("raised AgentConfigError not NameError", isinstance(exc, wb_agents.AgentConfigError), type(exc))
+
 print("PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

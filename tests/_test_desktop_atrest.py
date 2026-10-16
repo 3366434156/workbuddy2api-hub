@@ -195,6 +195,63 @@ class KeyblobTests(unittest.TestCase):
                 A.read_key_id()
 
 
+class AdoptKeyTests(unittest.TestCase):
+    """手工导入密钥：macOS / Linux 上没有进程内存回收那条路时用。
+
+    导入与回收共用同一道闸——先过 unwrap_keyblob() 自检，过不了就原样报错，
+    不动内存里已有的密钥。
+    """
+
+    def setUp(self):
+        self.secret = b64_32()
+        self.key, self.master, self.blob = make_keyblob(self.secret)
+        A.forget_key()
+        self._patch = mock.patch.object(A, "load_keyblob", lambda: self.blob)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        A.forget_key()
+
+    def test_parse_accepts_hex_and_base64(self):
+        self.assertEqual(A.parse_key_text(self.key.hex()), self.key)
+        self.assertEqual(A.parse_key_text(self.key.hex().upper()), self.key)
+        self.assertEqual(A.parse_key_text("  0x%s  " % self.key.hex()), self.key)
+        # 44 字符 base64 是客户端载荷里的 atRestSecretKey，sha256 之后才是保护密钥
+        self.assertEqual(A.parse_key_text(self.secret), self.key)
+
+    def test_parse_rejects_garbage(self):
+        for bad in ("", "   ", "zz", self.key.hex()[:-2], self.key.hex() + "00", "not-a-key"):
+            with self.assertRaises(A.AtRestError):
+                A.parse_key_text(bad)
+
+    def test_adopt_key_caches_and_reports_source(self):
+        self.assertEqual(A.adopt_key(self.key.hex()), self.key)
+        self.assertEqual(A.cached_key(), self.key)
+        info = A.status()
+        self.assertTrue(info["keyCached"])
+        self.assertEqual(info["keySource"], "manual")
+        self.assertNotIn(self.key.hex(), json.dumps(info))      # 状态里不带密钥
+
+    def test_adopt_key_rejects_wrong_key_without_touching_cache(self):
+        A.adopt_key(self.key.hex())
+        with self.assertRaises(A.AtRestError):
+            A.adopt_key(b64_32())          # 另一把密钥，跟 keyblob 的 protectorKeyId 对不上
+        self.assertEqual(A.cached_key(), self.key)              # 已经就绪的好密钥没被顶掉
+
+    def test_forget_key_clears_source(self):
+        A.adopt_key(self.key.hex())
+        A.forget_key()
+        self.assertIsNone(A.cached_key())
+        self.assertEqual(A.status()["keySource"], "")
+
+    def test_status_platform_fields(self):
+        info = A.status()
+        self.assertEqual(info["huntSupported"], A.hunt_supported())
+        self.assertEqual(bool(info["huntHint"]), not A.hunt_supported())
+        self.assertIn(sys.platform, A.hunt_hint())              # 提示语里带上当前平台
+
+
 class ConfigDirProbeTests(unittest.TestCase):
     """config_dir 在 ~/.workbuddy-ai 与 ~/.workbuddy 之间按 keyblob 存在性探测。
 

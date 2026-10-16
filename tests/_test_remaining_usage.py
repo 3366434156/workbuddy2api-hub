@@ -162,6 +162,21 @@ def clear_daily():
     P._estimate_daily_cache["entry"] = ((P.ESTIMATE_DAILY_FILE, None, None), {})
 
 
+def clear_log():
+    """清掉 usage.jsonl（每个用例从空日志开始）。
+
+    整套用例共用一个 USAGE_LOG：write_log() 截断，append_log() 只追加。于是
+    「跨天归档」那条把行追加进了上一个用例留下的日志里，而留下的那些行用的是
+    **真实时钟**（含 429 行的重置时刻），它们的重置时刻会插进本用例的窗口、被
+    _cap_window_start 当成链式起点，样本从 820 被截成 120。真实部署只有一个
+    进程、一个日志，不存在「上一个用例」，所以这是测试隔离问题。
+    """
+    try:
+        os.unlink(P.USAGE_LOG)
+    except OSError:
+        pass
+
+
 def restart_fold():
     """Drop the in-memory fold the way a process restart would."""
     with P._remaining_state_lock:
@@ -217,6 +232,7 @@ class RemainingUsageTests(unittest.TestCase):
     def setUp(self):
         clear_events()
         clear_daily()
+        clear_log()
         restart_fold()
     def test_sample_is_the_24h_before_the_reset(self):
         reset, detail = reset_epoch("2026-10-10 15:18:17")

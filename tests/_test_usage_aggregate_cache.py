@@ -20,6 +20,8 @@ v4 起一类状态一份文件（usage-aggregate-cache-<kind>.json）：这一�
   * 降级：损坏 JSON / 截断 / schema 不符 / 日志被替换、截断或同尺寸重写 /
     tail 签名不符 / 位置或类型不合法 / 目录不可写，一律当作没有缓存、走
     全量，结果正确且不抛错；
+  * 采纳：剪枝线摘掉旧天的小时表（小时层比日桶短命）不算损坏，analytics
+    状态照常采用——误拒就会天天全量重折（#26）；
   * 指纹：价格表或 realm 归属一变，checkpoint 必须作废；
   * 节流：默认阈值下连续刷新不写文件，推进到阈值才写；
   * 开关：WB_USAGE_CACHE=0 时行为与 #189 原状一致（不读也不写）。
@@ -745,7 +747,73 @@ mutate_cache(lambda d: _entry(d, "snapshot", None).pop("realm"),
 mutate_cache(lambda d: _entry(d, "snapshot", None).update({"realm": 5}),
              "realm 字段类型不对")
 
-# 4.6 指纹
+# 4.6 采纳：剪枝线摘掉旧天的小时表不算损坏（#26）
+#
+# _prune_day_buckets 的 hours_keep 一段会把保留窗口之外的旧天的小时表摘掉
+# （pop 掉键；午夜兜底那天则置 None）。摘掉之后这份状态仍然可用：按日对齐的
+# 窗口照旧由日桶自身的 maps 回答，整点窗口本来就按 hours is None 退回整段
+# 扫描。曾经 analytics 的日桶判据要求 hours 必须是 dict，于是「只要还在折新行，
+# 剪枝线天天摘、整份状态天天被判废」，每次进程启动都要付一次全量重折（44MB
+# 副本上实测 ~3s）。下面反过来钉：这样的状态**必须被采纳**。
+
+
+def strip_day_hours(entry, mode="pop"):
+    """模拟剪枝线：把日桶的 hours 子表摘掉。返回摘掉的天数。"""
+    days = entry.get("days") or {}
+    stripped = 0
+    for bucket in days.values():
+        if not isinstance(bucket, dict) or "hours" not in bucket:
+            continue
+        if mode == "pop":
+            bucket.pop("hours", None)
+        else:
+            bucket["hours"] = None
+        stripped += 1
+    return stripped
+
+
+def accept_cache(mutate, label, kind="analytics", realm=None):
+    """加标记 + 变异后加载——标记必须仍出现在结果里（= 状态被采纳）。
+
+    与 mutate_cache 相反：那边钉「坏状态必须被拒」，这边钉「合法状态不许被
+    误拒」。被误拒时走全量重折，标记消失、结果等于真值，用例当场失败。
+
+    每轮先清掉盘上的 checkpoint 从干净的一份重来：与降级用例不同，这里标记
+    会被真的采用，采用后的状态可能落回盘上，不清就会把 +1000 带进后面的用例。
+    """
+    clear_cache_files()
+    make_checkpoint()
+    data = cache_data()
+    poison(data, kind, realm)
+    mutate(data)
+    save_cache(data)
+    cache_env_nowrite()
+    restart()
+    got, err = live_canon()
+    check(label, got is not None and got != GOLDEN,
+          err or "状态被误拒（标记没出现，说明整份重折了）")
+
+
+_state = {}
+accept_cache(lambda d: _state.update(
+    n=strip_day_hours(_entry(d, "analytics", None))),
+    "旧天没有 hours 键的 analytics 状态仍被采纳（#26）")
+check("用例有实义：确实摘掉了至少一个日桶的 hours 键",
+      _state.get("n", 0) > 0, "夹具里没有带 hours 的日桶")
+
+_state = {}
+accept_cache(lambda d: _state.update(
+    n=strip_day_hours(_entry(d, "analytics", None), "none")),
+    "旧天的 hours 为 null 的 analytics 状态仍被采纳（#26）")
+check("用例有实义：确实把至少一个日桶的 hours 置成了 null",
+      _state.get("n", 0) > 0, "夹具里没有带 hours 的日桶")
+
+# 收尾：把带标记的状态从盘上清掉、重建一份干净的 checkpoint，免得 +1000
+# 顺着盘上的文件漏进后面的指纹用例。
+clear_cache_files()
+make_checkpoint()
+
+# 4.7 指纹
 mutate_cache(lambda d: _entry(d, "snapshot").update({"pricing": ["on", "x", "y", "z"]}),
              "价格指纹被改（旧形状的列表）")
 mutate_cache(lambda d: _entry(d, "snapshot").update({"pricing": None}),
@@ -763,7 +831,7 @@ mutate_cache(lambda d: _entry(d, "analytics")["pricing"].update({"refs": {"ghost
 mutate_cache(lambda d: _entry(d, "analytics").update({"realm_inputs": ["cn", []]}),
              "analytics 的 realm 指纹被改", kind="analytics")
 
-# 4.7 真实变化：价格表 / realm 归属
+# 4.8 真实变化：价格表 / realm 归属
 make_checkpoint()
 write_pricing({**PRICING, "meta": {"usd_cny": 7.4}, "models": {
     **PRICING["models"],

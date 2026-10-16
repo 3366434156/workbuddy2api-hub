@@ -80,6 +80,59 @@ def _idle_ttl():
         return 90.0
 
 
+_SSL_CONTEXT = None
+_SSL_CONTEXT_FACTORY = None
+_SSL_CONTEXT_LOCK = threading.Lock()
+
+
+def _resolve_ssl_factory():
+    """(标识, 构造器)：http.client 在 context=None 时实际会走的那条路。
+
+    3.13 起是 http.client._create_https_context(check_hostname)，之前直接是
+    ssl._create_default_https_context()。取这条接缝而不是直接调
+    ssl.create_default_context()，是为了让「谁都能换掉默认 context」继续有效
+    ——测试就是靠它把自签证书塞进 https 主路径的。
+
+    标识是底层那个函数对象本身：它变了就说明默认 context 被换过，缓存要作废。
+    """
+    factory = getattr(http.client, "_create_https_context", None)
+    if factory is not None:
+        # check_hostname=None 与 HTTPSConnection 自己的取法一致（不覆盖
+        # _create_default_https_context 给出的默认值）。
+        return factory, (lambda: factory(None))
+    factory = getattr(ssl, "_create_default_https_context", None)
+    if factory is not None:
+        return factory, factory
+    return ssl.create_default_context, ssl.create_default_context
+
+
+def shared_ssl_context():
+    """进程级共享的出站 TLS context（懒建，只建一次）。
+
+    http.client 在 context=None 时**每建一条连接就调一次**
+    ssl._create_default_https_context()。真机实测 create_default_context()
+    单次 20.4ms（要解析 121 张 CA 证书），而 45 个账号各走自己的代理就是 45 个
+    池键，连接来回过期重连时这笔开销按次付。更要紧的是 OpenSSL 的客户端会话
+    缓存挂在 SSLContext 上：每换一个新 context 就等于放弃 TLS session
+    resumption，每次握手都退化成完整握手。
+
+    一份进程级 context 同时省掉这两笔。校验设置完全由 stdlib 那条工厂决定
+    （默认 check_hostname=True、verify_mode=CERT_REQUIRED、走系统 CA 库），
+    **不放松任何校验**；工厂被换掉时缓存自动作废，所以那条接缝仍然有效。
+
+    懒建而不是导入时建：测试与只跑面板的进程根本不出站，不该为它们白付 20ms。
+    """
+    global _SSL_CONTEXT, _SSL_CONTEXT_FACTORY
+    ident, build = _resolve_ssl_factory()
+    if _SSL_CONTEXT is None or _SSL_CONTEXT_FACTORY is not ident:
+        with _SSL_CONTEXT_LOCK:
+            ident, build = _resolve_ssl_factory()
+            if _SSL_CONTEXT is None or _SSL_CONTEXT_FACTORY is not ident:
+                _SSL_CONTEXT = build()
+                _SSL_CONTEXT_FACTORY = ident
+    return _SSL_CONTEXT
+
+
 class PoolBypass(Exception):
     """这个请求不走连接池，调用方回退到 urllib 原路径。
 
@@ -455,8 +508,9 @@ def _proxy_bypassed(host):
 def _new_connection(scheme, host, port, proxy_info, timeout):
     """新建一条连接对象（不连接，惰性连接交给 http.client 自己）。
 
-    - 直连：HTTPS 目标用 HTTPSConnection（context 由 http.client 的默认
-      _create_https_context 建，与 urllib HTTPSHandler 完全同一套校验设置）；
+    - 直连：HTTPS 目标用 HTTPSConnection（context 走进程级共享的
+      shared_ssl_context()，校验设置与 http.client 的默认 _create_https_context
+      逐项一致，只是不再每次建连重建一份）；
     - 经 HTTP 代理：连的是代理的地址；HTTPS 目标走 CONNECT 隧道（set_tunnel），
       HTTP 目标直接把绝对 URL 当请求目标发给代理。
     """
@@ -466,7 +520,8 @@ def _new_connection(scheme, host, port, proxy_info, timeout):
         proxy_port = int(proxy_info["port"]) if proxy_info["port"] else (
             443 if scheme == "https" else 80)
         if scheme == "https":
-            conn = _PooledHTTPSConnection(proxy_info["host"], proxy_port, timeout=timeout)
+            conn = _PooledHTTPSConnection(proxy_info["host"], proxy_port, timeout=timeout,
+                                          context=shared_ssl_context())
             tunnel_headers = {}
             auth = _proxy_auth_header(proxy_info)
             if auth:
@@ -476,7 +531,8 @@ def _new_connection(scheme, host, port, proxy_info, timeout):
             return conn
         return _PooledHTTPConnection(proxy_info["host"], proxy_port, timeout=timeout)
     if scheme == "https":
-        return _PooledHTTPSConnection(host, port, timeout=timeout)
+        return _PooledHTTPSConnection(host, port, timeout=timeout,
+                                      context=shared_ssl_context())
     return _PooledHTTPConnection(host, port, timeout=timeout)
 
 

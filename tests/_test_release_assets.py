@@ -839,5 +839,32 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 self.fail("上传路径不能直接指向 wrt/：%s" % stripped)
 
 
+    def test_portable_scripts_have_lf_and_executable_mode(self):
+        # Issue #329: 检查便携包内脚本换行与执行权限
+        # *.sh 与 *.command 必须为 LF 且带有 0o755 执行权限；*.bat 必须为 CRLF
+        crlf = bytes([13, 10])
+        with tempfile.TemporaryDirectory(prefix="wb-test-eol-") as tmp:
+            rt = os.path.join(tmp, "python")
+            make_runtime(rt)
+            out_zip = os.path.join(tmp, "out.zip")
+            ver = tools.source_version(ROOT)
+            tools.build_portable(ver, "v" + ver, out_zip, source=ROOT, runtime_dir=rt)
+            with zipfile.ZipFile(out_zip, "r") as zf:
+                for info in zf.infolist():
+                    name_lower = info.filename.lower()
+                    mode = (info.external_attr >> 16) & 0o777
+                    if name_lower.endswith((".sh", ".command")):
+                        content = zf.read(info)
+                        self.assertNotIn(crlf, content, f"{info.filename} 包含 CRLF 换行符")
+                        self.assertEqual(mode, 0o755, f"{info.filename} 权限不是 0o755 (got {oct(mode)})")
+                    elif name_lower.endswith(".bat"):
+                        content = zf.read(info)
+                        self.assertIn(crlf, content, f"{info.filename} 必须包含 CRLF 换行符")
+                        self.assertEqual(mode, 0o755, f"{info.filename} 权限不是 0o755")
+                    elif name_lower.endswith(".py"):
+                        content = zf.read(info)
+                        self.assertNotIn(crlf, content, f"{info.filename} 必须为 LF 换行符")
+
+
 if __name__ == "__main__":
     unittest.main()

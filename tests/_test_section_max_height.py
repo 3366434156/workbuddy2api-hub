@@ -72,6 +72,13 @@ class SectionMaxHeightTests(unittest.TestCase):
     def _write(self, data):
         with open(S.settings_path(self.dir), "w", encoding="utf-8") as fh:
             json.dump(data, fh)
+        # 直接写盘绕过了模块自己的写路径，所以得自己作废它的读缓存：缓存键是
+        # (path, st_mtime, st_size)，两次写落在同一个系统时钟刻里、长度又一样时
+        # 键完全撞上，第二次读回的是上一次的值（windows 上就撞过：
+        # test_a_boolean_reads_as_the_default 的 `false` 与本用例的 `500.9` 都是
+        # 29 字节，读到默认值 640 而不是 500）。`_load_cache["key"] = None` 就是
+        # 模块写路径用的同一个失效手法。
+        S._load_cache["key"] = None
 
     def _read(self):
         with open(S.settings_path(self.dir), encoding="utf-8") as fh:

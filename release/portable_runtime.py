@@ -83,12 +83,13 @@ REQUIRED_FILES = (
     "Lib/difflib.py", "Lib/fnmatch.py", "Lib/getpass.py", "Lib/glob.py",
     "Lib/ipaddress.py",
     "Lib/queue.py", "Lib/shutil.py",
-    "Lib/subprocess.py", "Lib/threading.py",
+    "Lib/subprocess.py", "Lib/threading.py", "Lib/sqlite3/__init__.py",
     "Lib/html/__init__.py", "Lib/http/__init__.py", "Lib/http/client.py",
     "Lib/concurrent/__init__.py", "Lib/concurrent/futures/__init__.py",
     "Lib/ctypes/__init__.py", "Lib/collections/__init__.py", "Lib/re/__init__.py",
     "DLLs/_socket.pyd", "DLLs/_ssl.pyd", "DLLs/_hashlib.pyd", "DLLs/_ctypes.pyd",
     "DLLs/select.pyd", "DLLs/unicodedata.pyd", "DLLs/_uuid.pyd", "DLLs/_decimal.pyd",
+    "DLLs/_sqlite3.pyd",
     "DLLs/libffi-8.dll", "DLLs/libssl-3-x64.dll", "DLLs/libcrypto-3-x64.dll",
 )
 

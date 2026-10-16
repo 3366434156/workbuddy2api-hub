@@ -88,25 +88,70 @@ def _read_text(path):
         raise AgentConfigError("%s is not valid UTF-8: %s" % (path, exc))
 
 
-def _atomic_write_text(path, text):
-    """tmp + os.replace so a crash cannot leave a half-written config."""
+# Every file this module writes carries the gateway API key (inline, or via the
+# env reference that the sibling credentials file resolves), so a fresh one is
+# created owner-only rather than with open()'s 0666 & ~umask - 0644 under the
+# usual umask 022. DSH refuses to start when its credentials file is readable
+# beyond its owner, and the same 0644 would expose every other client's key.
+WRITE_MODE = 0o600
+
+
+def _target_mode(path):
+    """The mode to give `path` on the next write.
+
+    `WRITE_MODE` for a new file, or for one whose current mode is wider than
+    owner-only (or does not even let its owner read it back); otherwise the
+    file's own mode, so a re-apply preserves a stricter permission the user set
+    by hand instead of widening it back - 0600 -> 0600 and 0400 -> 0400, but
+    0644 -> 0600.
+    """
+    try:
+        current = os.stat(path).st_mode & 0o777
+    except OSError:
+        return WRITE_MODE
+    if current & 0o077 or not current & 0o400:
+        return WRITE_MODE
+    return current
+
+
+def _atomic_write(path, data):
+    """tmp + os.replace so a crash cannot leave a half-written config.
+
+    The temp file is created owner-only (see `_target_mode`) rather than with
+    the umask's default, and settled on the resolved mode after writing. Any
+    failure on the way - including the chmod or the replace - removes the temp
+    file, so a retry never trips over a leftover it cannot write to.
+    """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    mode = _target_mode(path)
+    try:
+        os.unlink(tmp)  # a stale temp from a killed run may not be writable
+    except OSError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    fd = os.open(tmp, flags, WRITE_MODE)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_text(path, text):
+    _atomic_write(path, text.encode("utf-8"))
 
 
 def _atomic_write_bytes(path, data):
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as fh:
-        fh.write(data)
-    os.replace(tmp, path)
+    _atomic_write(path, data)
 
 
 def _prune_empty_parents(path, home=None):
@@ -663,8 +708,7 @@ def _dsh_provider_block(indent, provider_id, provider, models):
     本机实测：DSH 的补丁加载器不认行内 JSON（`wb-proxy: {...}`）——一键配置
     写入 3 分钟后被 DSH 重写回原状，provider 不显示；而它自己保存的
     providers 全是块式映射。模型字段对齐 wb 条目：id/name/contextWindow/
-    reasoningEfforts；maxTokens 与 input 没有可信来源，留空（同为可选：
-    gemini-3.1-pro-preview 与 glm-5.3 两个无此字段的条目照常工作）。
+    reasoningEfforts/maxTokens/supportsVision。
     """
     pad = " " * indent
     lines = [pad + provider_id + ":"]
@@ -682,9 +726,17 @@ def _dsh_provider_block(indent, provider_id, provider, models):
             if m.get("contextWindow"):
                 lines.append(inner + "    contextWindow: %d"
                              % int(m["contextWindow"]))
-            lines.append(inner + "    reasoningEfforts:")
-            for level in ("low", "high", "max"):
-                lines.append(inner + "      %s: %s" % (level, level))
+            if m.get("maxTokens"):
+                lines.append(inner + "    maxTokens: %d"
+                             % int(m["maxTokens"]))
+            if m.get("reasoningEfforts"):
+                lines.append(inner + "    reasoningEfforts:")
+                for level in sorted(m["reasoningEfforts"]):
+                    lines.append(inner + "      %s: %s"
+                                 % (_yaml_scalar(level),
+                                    _yaml_scalar(m["reasoningEfforts"][level])))
+            if m.get("supportsVision"):
+                lines.append(inner + "    supportsVision: true")
     return lines
 
 
@@ -772,9 +824,20 @@ def _apply_dsh_patch(paths, ctx):
         mid = entry.get("id")
         if not mid:
             continue
-        models.append({"id": mid, "name": mid,
-                       **({"contextWindow": int(entry["context_window"])}
-                          if entry.get("context_window") else {})})
+        item = {"id": mid, "name": mid,
+                **({"contextWindow": int(entry["context_window"])}
+                   if entry.get("context_window") else {})}
+        if entry.get("max_output"):
+            try:
+                item["maxTokens"] = int(entry["max_output"])
+            except (TypeError, ValueError):
+                pass
+        levels = dsh_reasoning_levels(entry.get("reasoning_efforts"))
+        if levels:
+            item["reasoningEfforts"] = levels
+        if entry.get("supports_vision") or entry.get("supportsVision"):
+            item["supportsVision"] = True
+        models.append(item)
     provider = {
         "displayName": ctx["provider_name"],
         "apiKeyEnv": ctx["credential_ref"],
@@ -799,13 +862,58 @@ def _apply_dsh_patch(paths, ctx):
     return {patch_path: "\n".join(lines), cred_path: cred_text}
 
 
-def _apply_dsh(paths, ctx):
-    # 新版 DSH 用 profiles/<profile>/*.patch.yml 补丁层；旧版才写 settings.yaml。
-    # paths 里带 patch 就只碰补丁 + 凭据，绝不再生成一份会被新版忽略的旧
-    # settings；补丁文件本身缺失（全新档案）就当空文件新建。
-    if "patch" in paths:
-        return _apply_dsh_patch(paths, ctx)
-    return _apply_dsh_legacy(paths, ctx)
+def dsh_reasoning_levels(raw):
+    """{档位: 线上拼写} for DSH, from the gateway's `reasoning_efforts` list.
+
+    DSH 的模型条目用 `reasoningEfforts` 声明可选思考档位（键=选择器里的档位，
+    值=请求里实际发的拼写）。本路由不在它的内置目录里，所以不声明就没有选择
+    器——`/v1/models` 里的 `reasoning_efforts` 它不读，它只读 id / name /
+    contextWindow / maxTokens。网关宣告的档位名就是上游认的拼写，一一照抄即可；
+    固定档位的模型（网关只给 reasoning_fixed_effort）没有列表，就不声明：给了
+    选择器也不会改变上游实际跑的档位。
+    """
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, (list, tuple)):
+        pairs = [(lvl, lvl) for lvl in raw]
+    else:
+        return None
+    levels = {}
+    for level, wire in pairs:
+        name = str(level or "").strip()
+        if not name:
+            continue
+        levels[name] = str(wire or "").strip() or name
+    return levels or None
+
+
+def dsh_default_model(text, provider, model):
+    """The `agent-default-model` entry to write, keeping keys we do not own.
+
+    yaml_upsert_inline() replaces that leaf wholesale, so writing a bare
+    {provider, model} silently drops whatever the user set beside it - a
+    reasoningEffort, for instance, which is how a default thinking level gets
+    lost on a re-apply. Read the current inline mapping and merge the route
+    over it; a block-style or unparsable value falls back to the bare pair
+    rather than guessing.
+    """
+    out = {"provider": provider, "model": model}
+    for line in str(text or "").split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("agent-default-model:"):
+            continue
+        raw = stripped.split(":", 1)[1].strip()
+        if raw.startswith("{"):
+            try:
+                current = json.loads(raw)
+            except ValueError:
+                current = None
+            if isinstance(current, dict):
+                out = dict(current)
+        break
+    out["provider"] = provider
+    out["model"] = model
+    return out
 
 
 def _apply_dsh(paths, ctx):
@@ -828,6 +936,16 @@ def _apply_dsh_legacy(paths, ctx):
         item = {"id": mid}
         if entry.get("context_window"):
             item["contextWindow"] = entry["context_window"]
+        if entry.get("max_output"):
+            try:
+                item["maxTokens"] = int(entry["max_output"])
+            except (TypeError, ValueError):
+                pass
+        levels = dsh_reasoning_levels(entry.get("reasoning_efforts"))
+        if levels:
+            item["reasoningEfforts"] = levels
+        if entry.get("supports_vision") or entry.get("supportsVision"):
+            item["supportsVision"] = True
         models.append(item)
     provider_id = ctx["provider_id"]
     provider = {
@@ -835,6 +953,10 @@ def _apply_dsh_legacy(paths, ctx):
         "apiKeyEnv": ctx["credential_ref"],
         "api": "openai-completions",
         "baseURL": ctx["base_url_v1"],
+        # wb-proxy 不在 DSH 的内置目录里，推理字段的线上形状必须自己说明：
+        # 走标准 reasoning_effort，不发 thinking 块——DeepSeek 系需要的那份
+        # thinking / reasoning_content 由网关补（wb_proxy.build_upstream_body）。
+        "compat": {"thinkingFormat": "openai", "supportsReasoningEffort": True},
     }
     if models:
         provider["models"] = models
@@ -843,7 +965,7 @@ def _apply_dsh_legacy(paths, ctx):
     if ctx.get("model"):
         text = yaml_upsert_inline(
             text, "agent-default-model",
-            {"provider": provider_id, "model": ctx["model"]})
+            dsh_default_model(text, ctx["provider_id"], ctx["model"]))
     credentials_path = paths["credentials"]
     cred_text = _read_text(credentials_path)
     cred_text = yaml_refs_upsert(cred_text, ctx["credential_ref"], ctx["api_key"])
@@ -1380,6 +1502,11 @@ def fetch_models_from_gateway(base_url, api_key, timeout=10):
                 entry["max_output"] = int(out_tokens)
             except (TypeError, ValueError):
                 pass
+        efforts = item.get("reasoning_efforts")
+        if isinstance(efforts, (list, tuple)):
+            levels = [str(e).strip() for e in efforts if str(e or "").strip()]
+            if levels:
+                entry["reasoning_efforts"] = levels
         name = item.get("name")
         if name:
             entry["name"] = str(name)

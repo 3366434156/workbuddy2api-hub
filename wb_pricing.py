@@ -2371,7 +2371,9 @@ class PriceRefresher(threading.Thread):
             out, seen = [], set()
             for realm in LIVE_CATALOG_REALMS:
                 try:
-                    entries, _extras = gateway.curated_live_sources(realm)
+                    # (entries, extras, source) - the source label is for the
+                    # panel's provenance line; pricing only reads the entries.
+                    entries, _extras, _source = gateway.curated_live_sources(realm)
                 except Exception as exc:
                     self.log("live 目录取不到（%s），该区域本轮只按内置目录：%s"
                              % (realm, exc))

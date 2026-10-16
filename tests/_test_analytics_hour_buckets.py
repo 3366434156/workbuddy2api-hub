@@ -17,7 +17,8 @@
   * 覆盖不到就退回扫描：非整小时的起点、until 切在桶中间、小时被剪掉、
     days_floor 以下——一律退回，结果与改动前的逐行口径一致；
   * checkpoint：小时子表与 max_at 随状态落盘/加载，重启（含真·子进程）后
-    与冷折逐字节一致；旧格式的日桶（没有 at/hours）整体拒收 → 重折一次；
+    与冷折逐字节一致；旧格式的日桶（没有 at）整体拒收 → 重折一次；而旧天
+    被剪掉的小时表（hours 键缺席或为 null）**不算损坏**，状态照常采用（#26，采纳用例见 _test_usage_aggregate_cache.py）；
   * 降级：坏小时子表（形状/小时键/at/max_at）一律当作没有缓存，结果回到真值；
   * 保留：WB_USAGE_HOUR_KEEP_HOURS 决定小时子表的保留线，剪掉的天退回扫描；
   * 开关：WB_USAGE_DAY_BUCKETS=0 时与改动前逐字节一致（旧口径）。
@@ -732,7 +733,7 @@ check("新进程记录到了加载的 offset（含 analytics）",
       "analytics" in child_state, child_state)
 
 print()
-print("[7] 降级：坏小时子表/旧格式一律当作没有缓存，结果回到真值")
+print("[7] 降级：坏小时子表/旧格式一律当作没有缓存（另有用例钉旧天的小时表缺席不算损坏）")
 
 
 def poison(data, realm=None):
@@ -780,7 +781,9 @@ mutate(lambda d: an_entry(d).update({"max_at": "now"}), "max_at 不是数字")
 mutate(lambda d: an_entry(d).update({"max_at": True}), "max_at 写成 true")
 mutate(lambda d: newest_day(d).pop("at"), "日桶没有 at（旧格式）")
 mutate(lambda d: newest_day(d).update({"at": "midnight"}), "日桶的 at 不是数字")
-mutate(lambda d: newest_day(d).pop("hours"), "日桶没有 hours（旧格式）")
+# 注意：这里**没有**「日桶没有 hours」那条用例。剪枝线摘掉旧天的小时表是被认可的
+# 常态（#26），采纳覆盖钉在 _test_usage_aggregate_cache.py（标记落在 all-time
+# 的 maps 上，一定可见，不受夹具/时区影响）。
 mutate(lambda d: newest_day(d).update({"hours": []}), "hours 不是对象")
 mutate(lambda d: mutate_hour(d, lambda h, k: h.update({"x": {}})),
        "小时键不是数字")

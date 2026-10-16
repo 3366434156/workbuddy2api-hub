@@ -134,7 +134,8 @@ class BoundaryCase(unittest.TestCase):
     # /updates/check is the half of the update pair that was already correct;
     # the two pricing writes are the ones the panel's own buttons post to.
     PANEL_ONLY_POST = ("/updates/check", "/pricing/refresh",
-                       "/pricing/mapping", "/settings/save")
+                       "/pricing/mapping", "/settings/save",
+                       "/catalog/refresh")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="panel-route-")

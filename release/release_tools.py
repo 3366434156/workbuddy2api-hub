@@ -101,9 +101,26 @@ def build_portable(version, tag, out_path, source=ROOT, runtime_dir=None,
         raise SystemExit("清单里的文件不存在：%s" % ", ".join(missing))
 
     entries = []
+    crlf_bytes = bytes([13, 10])
+    lf_bytes = bytes([10])
     for name in files:
         with open(os.path.join(source, name), "rb") as fh:
-            entries.append(("%s/%s" % (root, name), fh.read(), 0o644))
+            data = fh.read()
+        lower = name.lower()
+        if lower.endswith((".sh", ".command")):
+            # Issue #329: 强制 LF 换行并赋予执行位，防止 Windows 检出的 CRLF 导致 macOS / Linux 启动报 bad interpreter
+            data = data.replace(crlf_bytes, lf_bytes)
+            mode = 0o755
+        elif lower.endswith(".bat"):
+            # Windows 批处理脚本保持 CRLF
+            data = data.replace(crlf_bytes, lf_bytes).replace(lf_bytes, crlf_bytes)
+            mode = 0o755
+        elif lower.endswith((".py", ".json", ".md", ".html", ".txt", "license")):
+            data = data.replace(crlf_bytes, lf_bytes)
+            mode = 0o644
+        else:
+            mode = 0o644
+        entries.append(("%s/%s" % (root, name), data, mode))
     runtime_files = 0
     for dirpath, _dirnames, filenames in os.walk(runtime_dir):
         for fn in filenames:

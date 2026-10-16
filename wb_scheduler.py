@@ -204,9 +204,8 @@ class Scheduler:
                     res = acc.daily_chat(trigger="scheduler")
                     if res.get("ok"):
                         daily_chat_count += 1
-                        # 桌面端那条几乎不会失败，真正决定积分的网页通道就在 msg
-                        # 里（completed：N 段输出 / 失败原因），日志不带上它的话，
-                        # 面板只显示「成功」，第二天才发现积分没到（issue #236）。
+                        # 成功时也把网页通道那一轮的结果带上（completed：N 段输出），
+                        # 光看「成功」分不清是真跑完了还是只有桌面腿过了（issue #236）。
                         self.log(f"✓ 账号 [{uid8}] 每日活跃对话成功: {res.get('msg')}")
                     else:
                         self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")
