@@ -149,7 +149,10 @@ class ChatPathTests(unittest.TestCase):
         def fake_urlopen(req, timeout=30, proxy=""):
             raise failure
         A.urlopen = fake_urlopen
-        with mock.patch.object(P.time, "sleep", lambda *_: None):
+        with mock.patch.object(P.time, "sleep", lambda *_: None),                 mock.patch.object(P.wb_settings, "egress_backoff_enabled",
+                                  lambda d: False):
+            # egress 退避按安装读取（本机 settings.json 里是开的）——这一组
+            # 断言描述的是「上游失败仍要记账」的账号级路径，把开关钉在关。
             return P.open_upstream({"model": "deepseek-v4.1-flash",
                                     "messages": [{"role": "user", "content": "hi"}]},
                                    target_realm="intl")

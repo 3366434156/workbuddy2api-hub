@@ -11628,6 +11628,11 @@ function renderAgentCards(){
       appliedHtml = '<div style="font-size:11px;color:var(--dim);margin-top:8px;line-height:1.7">'
         + '<div>应用时间: <span class="mono">' + at + '</span></div>'
         + '<div>base_url: <span class="mono">' + esc(applied.base_url || '-') + '</span></div>'
+        + (applied.provider_name
+          ? '<div>条目: <span class="mono">' + esc(applied.provider_name)
+            + (applied.provider_id && applied.provider_id !== applied.provider_name
+              ? ' (' + esc(applied.provider_id) + ')' : '') + '</span></div>'
+          : '')
         + '<div>模型: <span class="mono">' + esc(applied.model || '(未指定)') + '</span></div>'
         + '</div>';
       if(applied.external_change){

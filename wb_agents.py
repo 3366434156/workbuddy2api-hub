@@ -36,6 +36,11 @@ import urllib.request
 PROVIDER_ID = "wb-proxy"
 PROVIDER_NAME = "WB Proxy"
 CREDENTIAL_REF = "WB_PROXY_API_KEY"
+# 条目显示名的中文区域叫法：客户端的 provider 下拉里「WB Proxy cn / intl」
+# 分不清哪个是国内哪个是国际（cn/intl 是给 id 用的机器后缀，不是给人看的）。
+# 显示名直接用中文；id/credential_ref 仍用 -cn/-intl 机器后缀（文件键、环境
+# 变量名不允许也读不懂中文）。
+PROVIDER_NAME_CN = {"cn": "国内版", "intl": "国际版"}
 
 # A config file bigger than this is almost certainly not the hand-edited
 # settings file we expect, so refuse rather than risk corrupting user data.
@@ -301,6 +306,91 @@ def yaml_upsert_inline(text, key_path, value):
     return "\n".join(lines)
 
 
+def _migrate_legacy_provider_lines(lines, base_provider_id, scoped_id):
+    """区域条目落地时移除旧的无后缀条目，返回 (lines, removed)。
+
+    旧版一键配置只写一条无后缀的 wb-proxy（Key 多为 launcher_key，不绑定
+    区域，请求跟随面板切换路由）——用户「选了国内却消耗国际」的来源正是
+    它：新条目配上后它还留在客户端里，下拉里选的还是它。本次写的是带区域
+    后缀的条目（scoped_id != base_provider_id）且旧条目仍在时，把旧条目
+    整块删掉：它的 Key 已经原样搬进新条目的凭据，留着只有坏处。只对行级
+    (providers 映射里的键块) 生效；找不到就不动。
+    """
+    if scoped_id == base_provider_id:
+        return lines, False
+    return _drop_yaml_block_key(lines, base_provider_id)
+
+
+def _drop_yaml_block_key(lines, key):
+    """删除顶层 6 空格缩进（DSH providers 体）下 `key:` 的整个块。
+
+    只处理 DSH 补丁层的 providers 形状：块从 `      <key>:` 起，到下一个
+    缩进 <= 6 的非空行止。找不到键原样返回 (lines, False)。
+    """
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip() == " " * 6 + str(key) + ":":
+            start = i
+            break
+    if start is None:
+        return lines, False
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        l = lines[j]
+        if l.strip() and (len(l) - len(l.lstrip())) <= 6:
+            end = j
+            break
+    del lines[start:end]
+    return lines, True
+
+
+def _drop_inline_provider(text, parent_path, key):
+    """行内式 settings.yaml 里删掉 `parent_path.<key>:` 的叶子键。
+
+    用 yaml_upsert_inline 的扫描器找到该键块再整块删；键不存在原样返回。
+    """
+    keys = [part.strip() for part in parent_path.split(".") if part.strip()]
+    keys.append(str(key))
+    lines = text.split("\n")
+    # 复用 upsert 的定位逻辑：走一遍"upsert 为自身标记"，代价高；这里直接
+    # 扫描：缩进链上逐键下钻。
+    indent = 0
+    start = None
+    block_end = None
+    remaining = list(keys)
+    i = 0
+    n = len(lines)
+    while i < n and remaining:
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        cur_indent = len(line) - len(line.lstrip())
+        if cur_indent != indent:
+            i += 1
+            continue
+        name = stripped.split(":", 1)[0].strip()
+        if name == remaining[0]:
+            start = i
+            remaining = remaining[1:]
+            if remaining:
+                indent += 2
+            i += 1
+            continue
+        i += 1
+    if start is None or remaining:
+        return text
+    end = n
+    for j in range(start + 1, n):
+        l = lines[j]
+        if l.strip() and (len(l) - len(l.lstrip())) <= indent:
+            end = j
+            break
+    del lines[start:end]
+    return "\n".join(lines)
+
+
 def _yaml_upsert_at(lines, start, end, indent, keys, value_json):
     """Recursive block scanner for yaml_upsert_inline; returns new lines."""
     key = keys[0]
@@ -466,6 +556,26 @@ def _toml_upsert_in_range(lines, start, end, mapping):
     return lines
 
 
+def toml_drop_table(text, table):
+    """删掉整个 `[table]` 段（到下一个表头或文件尾）；不存在原样返回。
+
+    供区域条目落地时迁走旧的无后缀 model_providers 段用——旧段引用的
+    launcher_key 不绑定区域，留着就是「选国内消耗国际」的来源。
+    """
+    lines = text.split("\n")
+    idx = 0
+    while idx < len(lines):
+        m = _TOML_TABLE_RE.match(lines[idx])
+        if m and m.group(1) == table:
+            end = idx + 1
+            while end < len(lines) and not _TOML_TABLE_RE.match(lines[end]):
+                end += 1
+            del lines[idx:end]
+            return "\n".join(lines)
+        idx += 1
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Text-level dotenv editor
 # ---------------------------------------------------------------------------
@@ -591,6 +701,10 @@ def _apply_codex(paths, ctx):
     text = toml_upsert_top_key(text, "model_provider", provider_id)
     if ctx.get("model"):
         text = toml_upsert_top_key(text, "model", ctx["model"])
+    # 区域条目落地时迁走旧的无后缀 model_providers 段（launcher_key 不绑
+    # 区域，留着就是「选国内消耗国际」的来源）。
+    if provider_id != PROVIDER_ID:
+        text = toml_drop_table(text, "model_providers." + PROVIDER_ID)
     text = toml_upsert_table(text, "model_providers." + provider_id, {
         "name": ctx["provider_name"],
         "base_url": ctx["base_url_v1"],
@@ -624,6 +738,8 @@ def _apply_opencode(paths, ctx):
     }
     if models:
         provider["models"] = models
+    if provider_id != PROVIDER_ID:
+        json_drop_key(data, "provider", PROVIDER_ID)
     data = deep_merge(data, {"provider": {provider_id: provider}})
     if ctx.get("model"):
         data["model"] = "%s/%s" % (provider_id, ctx["model"])
@@ -846,6 +962,8 @@ def _apply_dsh_patch(paths, ctx):
     }
     text = _read_text(patch_path) if os.path.isfile(patch_path) else ""
     lines = text.split("\n") if text else []
+    lines, _removed = _migrate_legacy_provider_lines(
+        lines, PROVIDER_ID, provider_id)
     lines = _dsh_patch_providers_upsert(lines, "llm-pi-ai",
                                         "@deepseek-ai/dsh-llm-pi-ai",
                                         provider_id, provider, models)
@@ -856,6 +974,12 @@ def _apply_dsh_patch(paths, ctx):
         lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
                                         "@deepseek-ai/dsh-agent-default-model",
                                         ["model"], ctx["model"])
+    elif _removed:
+        # 旧条目被迁走了而本次没指定默认模型：agent-default-model.provider
+        # 还指着已删除的 wb-proxy，客户端会拿不到 provider——跟着指到新条目。
+        lines = _dsh_patch_entry_upsert(lines, "agent-default-model",
+                                        "@deepseek-ai/dsh-agent-default-model",
+                                        ["provider"], provider_id)
     cred_path = paths["credentials"]
     cred_text = yaml_refs_upsert(_read_text(cred_path), ctx["credential_ref"],
                                  ctx["api_key"])
@@ -960,6 +1084,13 @@ def _apply_dsh_legacy(paths, ctx):
     }
     if models:
         provider["models"] = models
+    # 区域条目落地时移除旧的无后缀条目（行内式形状：键在 providers 映射里，
+    # 与补丁层同款迁移语义）。
+    if provider_id != PROVIDER_ID:
+        legacy_text = _drop_inline_provider(text, "llm-pi-ai.providers",
+                                            PROVIDER_ID)
+        if legacy_text != text:
+            text = legacy_text
     text = yaml_upsert_inline(
         text, "llm-pi-ai.providers.%s" % provider_id, provider)
     if ctx.get("model"):
@@ -993,6 +1124,8 @@ def _apply_crush(paths, ctx):
         "api_key": ctx["api_key"],
         "models": models,
     }
+    if ctx["provider_id"] != PROVIDER_ID:
+        json_drop_key(data, "providers", PROVIDER_ID)
     data = deep_merge(data, {"providers": {ctx["provider_id"]: provider}})
     return {path: _dump_json(data)}
 
@@ -1060,6 +1193,16 @@ def _apply_zcode(paths, ctx):
             break
     if not replaced:
         rules.append(rule)
+    # 区域条目落地时迁走旧的无后缀规则（launcher_key 不绑区域，留着就是
+    # 「选国内消耗国际」的来源），排序里的旧 id 一并清掉。
+    if provider_id != PROVIDER_ID:
+        holder["providerRules"] = [
+            r for r in rules
+            if not (isinstance(r, dict) and r.get("providerId") == PROVIDER_ID)]
+        config["providerOrder"] = [
+            pid for pid in (config.get("providerOrder") or [])
+            if pid != PROVIDER_ID]
+        rules = holder["providerRules"]
 
     order = config.get("providerOrder")
     if not isinstance(order, list):
@@ -1181,6 +1324,15 @@ def _client(client_id):
 # Public API
 # ---------------------------------------------------------------------------
 
+def ctx_provider_name(built, provider_label):
+    """built.plan 结果对应的显示名（与 plan() 的命名规则一致）。"""
+    if provider_label:
+        return ("WB代理-" + PROVIDER_NAME_CN.get(
+            str(provider_label).strip().lower(),
+            str(provider_label).strip().lower()))
+    return "WB代理"
+
+
 def overview(accounts_dir, home=None):
     """Per-client install/apply summary for the panel."""
     home = _resolve_home(home)
@@ -1210,6 +1362,8 @@ def overview(accounts_dir, home=None):
                 "at": record.get("applied_at"),
                 "base_url": record.get("base_url"),
                 "model": record.get("model"),
+                "provider_id": record.get("provider_id"),
+                "provider_name": record.get("provider_name"),
                 "files": len(record.get("files") or []),
                 "external_change": external,
             }
@@ -1229,6 +1383,23 @@ def overview(accounts_dir, home=None):
     return out
 
 
+def json_drop_key(data, path, key):
+    """在嵌套 dict 的 `path`（点分）下删除 `key`；返回 (data, removed)。
+
+    供区域条目落地时迁走旧的无后缀 provider 条目（JSON 系客户端：opencode /
+    crush / zcode）。路径缺失或键不存在原样返回 (data, False)。
+    """
+    node = data
+    for part in [p.strip() for p in path.split(".") if p.strip()]:
+        if not isinstance(node, dict) or part not in node:
+            return data, False
+        node = node[part]
+    if isinstance(node, dict) and key in node:
+        del node[key]
+        return data, True
+    return data, False
+
+
 def plan(client_id, base_url, api_key, model=None, models=None, home=None,
          provider_label=None):
     """The exact file contents integrate() would write; touches nothing.
@@ -1240,7 +1411,7 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None,
     prints is what a real run writes.
 
     ``provider_label`` 区分同一客户端里的多个网关条目：传 "cn"/"intl" 时
-    provider 的 id/名称/凭据引用都带区域后缀（wb-proxy-cn / WB Proxy cn /
+    provider 的 id/名称/凭据引用都带区域区分（wb-proxy-cn / WB代理-国内版 /
     WB_PROXY_API_KEY_CN），两把 Key 各配一次即并存；None/空 维持原单条目。
     """
     client = _client(client_id)
@@ -1256,9 +1427,12 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None,
             raise AgentConfigError(
                 "provider_label must be 1-12 chars of [a-z0-9-]")
         suffix = "-" + label
-        provider_name = PROVIDER_NAME + " " + label
+        # 显示名用中文区域叫法；id/凭据引用仍是机器后缀。label 不在预设里
+        # （自定义后缀）就退回 "WB代理-<label>"——总比丢失区分强。
+        provider_name = ("WB代理-"
+                         + PROVIDER_NAME_CN.get(label, label))
     else:
-        provider_name = PROVIDER_NAME
+        provider_name = "WB代理"
     ctx = {
         "base_url": base_url,
         "base_url_v1": base_url_v1,
@@ -1379,6 +1553,10 @@ def integrate(accounts_dir, client_id, base_url, api_key, model=None,
         "applied_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "base_url": built["base_url"],
         "model": built["model"],
+        # 条目身份：面板卡片据此显示「WB代理-国内版」这类中文名与 provider
+        # id，用户才知道这条配置走哪个出口。
+        "provider_id": built.get("provider_id"),
+        "provider_name": ctx_provider_name(built, provider_label),
         "files": entries,
     }
     _save_state(accounts_dir, state)
