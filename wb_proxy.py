@@ -17807,84 +17807,98 @@ class Handler(BaseHTTPRequestHandler):
         return "http://%s:%d/v1" % (host, int(port or 0))
 
     def _agents_models(self):
-        """Flat model list for the picker; bundled intl+cn catalog, deduped.
+        """Flat model list for the picker; intl+cn catalogs merged, deduped.
+
+        两个区域各取一份再合并——不能只取 fetch_models()（它跟随面板当前的
+        区域开关）：面板停在国内版时，国际独占模型（gpt-*、gemini-*…）会整排
+        消失，用户拿国内 Key 和国际 Key 各配一次，写出去的清单却一模一样。
+        每个条目带 `realms`（该模型在哪些出口可用），apply 侧据此按所选 Key
+        的出口过滤；两边都服务的不标（前端显示为「通用」）。
 
         Live sources stay out of this path on purpose: the panel must answer
         even when the upstream is down, so a failure here is simply a shorter
         list, never an error.
         """
         models = []
-        seen = set()
-        try:
+        seen = {}
+        catalog = {}
+        for realm in ("intl", "cn"):
             try:
-                entries = fetch_models()
+                entries = fetch_models(realm)
             except Exception:
                 entries = []
             if entries:
-                sources = ((mid, meta) for mid, meta in entries)
+                catalog[realm] = {str(mid or "").strip(): (meta or {})
+                                  for mid, meta in entries}
             else:
-                sources = (
-                    (item.get("id"), item)
-                    for item in (list(getattr(wb_catalog, "STATIC_INTL_MODELS", []))
-                                 + list(getattr(wb_catalog, "STATIC_CN_MODELS", [])))
-                    if isinstance(item, dict)
-                )
-            for mid, meta in sources:
-                mid = str(mid or "").strip()
-                if not mid or mid in seen:
+                static = getattr(wb_catalog,
+                                 "STATIC_CN_MODELS" if realm == "cn"
+                                 else "STATIC_INTL_MODELS", [])
+                catalog[realm] = {str(i.get("id") or "").strip(): (i or {})
+                                  for i in static if isinstance(i, dict)}
+            catalog[realm].pop("", None)
+        for realm in ("intl", "cn"):
+            for mid, meta in catalog[realm].items():
+                if not mid:
                     continue
-                seen.add(mid)
-                meta = meta if isinstance(meta, dict) else {}
-                entry = {"id": mid}
-                # 与 /v1/models 走同一条查找链（上游值 > 内建知识表 > 本地缓存 >
-                # 默认）：否则一键配置写进客户端的窗口会和网关自己宣告的对不上
-                # （目录里的 contextWindow.defaultLength 只是桌面端的默认档，
-                # deepseek-v4.1-flash 是 300k，而网关宣告的是 1M）。
+                if mid not in seen:
+                    seen[mid] = {"meta": meta, "realms": [realm]}
+                    continue
+                seen[mid]["realms"].append(realm)
+        for mid, info in seen.items():
+            meta = info["meta"] if isinstance(info["meta"], dict) else {}
+            entry = {"id": mid}
+            if info["realms"] != ["intl", "cn"]:
+                # 单出口模型才标；两边都有的是通用模型，标了反而让前端没法
+                # 区分「没数据」和「通用」。
+                entry["realms"] = info["realms"]
+            # 与 /v1/models 走同一条查找链（上游值 > 内建知识表 > 本地缓存 >
+            # 默认）：否则一键配置写进客户端的窗口会和网关自己宣告的对不上
+            # （目录里的 contextWindow.defaultLength 只是桌面端的默认档，
+            # deepseek-v4.1-flash 是 300k，而网关宣告的是 1M）。
+            try:
+                ctx, out, _src = wb_modelsdev.lookup(
+                    mid, meta.get("maxInputTokens"),
+                    meta.get("maxOutputTokens"), directory=ACCOUNTS_DIR)
+            except Exception:
+                ctx = meta.get("maxInputTokens")
+                out = meta.get("maxOutputTokens")
+            if not ctx:
+                window = meta.get("contextWindow")
+                if isinstance(window, dict):
+                    lengths = window.get("supportedLengths") or []
+                    ctx = window.get("defaultLength") or (
+                        lengths[-1] if lengths else None)
+            if ctx:
                 try:
-                    ctx, out, _src = wb_modelsdev.lookup(
-                        mid, meta.get("maxInputTokens"),
-                        meta.get("maxOutputTokens"), directory=ACCOUNTS_DIR)
-                except Exception:
-                    ctx = meta.get("maxInputTokens")
-                    out = meta.get("maxOutputTokens")
-                if not ctx:
-                    window = meta.get("contextWindow")
-                    if isinstance(window, dict):
-                        lengths = window.get("supportedLengths") or []
-                        ctx = window.get("defaultLength") or (
-                            lengths[-1] if lengths else None)
-                if ctx:
-                    try:
-                        entry["context_window"] = int(ctx)
-                    except (TypeError, ValueError):
-                        pass
-                if out:
-                    try:
-                        entry["max_output"] = int(out)
-                    except (TypeError, ValueError):
-                        pass
-                name = meta.get("name")
-                if name:
-                    entry["name"] = name
-                # Vision support flag (DSH and clients use this)
-                vision = bool(meta.get("supportsImages")) and not meta.get("disabledMultimodal")
-                if mid == "glm-5.3-flash":
-                    vision = False
-                if vision:
-                    entry["supports_vision"] = True
-                # 可选的思考档位交给客户端（DSH 用它生成会话里的档位选择器）。
-                # 只宣告目录明确列出档位的模型：固定档位的模型（只有
-                # reasoning.effort、没有 supportedEfforts）不列，选了也不会改变
-                # 上游实际跑的档位。
-                efforts = (meta.get("reasoning") or {}).get("supportedEfforts")
-                if isinstance(efforts, (list, tuple)):
-                    levels = [str(e).strip() for e in efforts
-                              if str(e or "").strip()]
-                    if levels:
-                        entry["reasoning_efforts"] = levels
-                models.append(entry)
-        except Exception:
-            pass
+                    entry["context_window"] = int(ctx)
+                except (TypeError, ValueError):
+                    pass
+            if out:
+                try:
+                    entry["max_output"] = int(out)
+                except (TypeError, ValueError):
+                    pass
+            name = meta.get("name")
+            if name:
+                entry["name"] = name
+            # Vision support flag (DSH and clients use this)
+            vision = bool(meta.get("supportsImages")) and not meta.get("disabledMultimodal")
+            if mid == "glm-5.3-flash":
+                vision = False
+            if vision:
+                entry["supports_vision"] = True
+            # 可选的思考档位交给客户端（DSH 用它生成会话里的档位选择器）。
+            # 只宣告目录明确列出档位的模型：固定档位的模型（只有
+            # reasoning.effort、没有 supportedEfforts）不列，选了也不会改变
+            # 上游实际跑的档位。
+            efforts = (meta.get("reasoning") or {}).get("supportedEfforts")
+            if isinstance(efforts, (list, tuple)):
+                levels = [str(e).strip() for e in efforts
+                          if str(e or "").strip()]
+                if levels:
+                    entry["reasoning_efforts"] = levels
+            models.append(entry)
         return models
 
     def _get_agents_cli(self):
@@ -17929,6 +17943,9 @@ class Handler(BaseHTTPRequestHandler):
                     keys.append({
                         "id": entry.get("id"),
                         "name": entry.get("name") or "",
+                        # 绑定出口：前端按它过滤默认模型下拉（国内 Key 不该
+                        # 列出 gpt-* 这些只有国际出口才认的模型）。
+                        "realm": str(entry.get("realm") or ""),
                         "enabled": True,
                     })
         except Exception:
@@ -18025,6 +18042,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(
                 400, "provider_label must be '', 'cn' or 'intl'",
                 "invalid_request_error")
+        # 写进客户端的模型清单按这条 provider 实际走的出口过滤：目录数据来自
+        # _agents_models() 的 `realms` 标注（intl/cn 独占才标，两边都服务的不
+        # 标）。不过滤的话，国内条目里会带着 gpt-* 这些只有国际出口才认的模型，
+        # 用户在客户端里选了它们，每个请求都白吃一轮 4xx。出口未知（无 realm
+        # 标注的全局 Key）就不筛——宁可多列通用模型，也不悄悄藏掉能用的。
+        if provider_label:
+            def _served_by(entry):
+                realms = entry.get("realms")
+                return not realms or provider_label in realms
+            scoped = [m for m in cleaned_models if _served_by(m)]
+            dropped = len(cleaned_models) - len(scoped)
+            if dropped:
+                warnings.append(
+                    "filtered %d model(s) not served by the %s exit"
+                    % (dropped, provider_label))
+            cleaned_models = scoped
+            if model and model not in {m["id"] for m in cleaned_models}:
+                # 默认模型也得跟着换：挑这个出口目录里的第一个（清单本身
+                # 按 intl→cn 拼接，取第一个就是该出口自己的模型）。
+                model = (cleaned_models[0]["id"] if cleaned_models else None)
+                warnings.append("default model not served by the %s exit; "
+                                "fell back to %s" % (provider_label, model))
         if not api_key:
             if auth_required():
                 return self._error(

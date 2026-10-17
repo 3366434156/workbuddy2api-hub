@@ -843,6 +843,37 @@ class Account(object):
             return False
         return remain <= reserve
 
+    def balance_exhausted(self):
+        """True when the known balance is at (or below) zero.
+
+        与 reserve_blocked 不同：这是「已经见底」的事实，不是「低于保留线」
+        的策略。积分从未抓取过的账号不算（fresh install 不该被当成空的）。
+        """
+        credits = self.credits
+        if not isinstance(credits, dict):
+            return False
+        remain = credits.get("remain")
+        if remain is None:
+            return False
+        try:
+            return float(remain) <= 0
+        except (TypeError, ValueError):
+            return False
+
+    def credits_blocked_for_model(self, model=None):
+        """True when this account should not serve `model` on its balance.
+
+        付费模型不打到余额见底的账号上：上游允许 0 积分继续透支消费（实测
+        remain=0 的账号跑 x0.06 模型一天扣了 122 分），欠费账号正是风控与
+        短信提醒的来源。免费模型（目录 x0.00）不算——它们不扣积分，余额
+        见底的账号照常服务，也正是「免费请求优先喂 0 积分账号」的另一半。
+        余额未知（从未抓取）不挡；没有 model 可判断（model=None）也不挡——
+        与 credit_limit_blocked 同款口径：调用方无法知道这次会不会扣积分。
+        """
+        if not model or self.model_is_free(model):
+            return False
+        return self.balance_exhausted()
+
     def soonest_expiring_days(self):
         """Days until the earliest credit package that still has credits left.
 
@@ -1116,6 +1147,12 @@ class Account(object):
         # Parked below the reserve: serving a request here is what would push
         # the balance to zero and trigger the upstream reminder SMS.
         if self.reserve_blocked():
+            return False
+        # 余额见底的账号不再接付费模型（免费模型照常，见
+        # credits_blocked_for_model）——上游允许 0 积分透支，欠费正是风控与
+        # 提醒短信的来源。免费请求优先喂这些账号（见
+        # AccountPool._pick_free_for_zero_balance）。
+        if self.credits_blocked_for_model(model):
             return False
         # Today's token budget is spent: keep the seat for tomorrow instead
         # of letting the upstream answer 429 for the rest of the day.
@@ -3037,6 +3074,12 @@ class AccountPool(object):
         account = self._pick_weighted_first(snapshot, exclude, model)
         if account is not None:
             return account
+        # 免费请求优先喂余额见底的账号：免费模型不扣积分，把付费账号的轮次
+        # 留给真正扣积分的请求。0 积分账号全忙（冷却/被排除）时照旧落回下面
+        # 的自动偏好与轮询——一个空账号卡不住池子。
+        account = self._pick_free_for_zero_balance(snapshot, exclude, model)
+        if account is not None:
+            return account
         account = self._pick_expiring_first(snapshot, exclude, model)
         if account is not None:
             return account
@@ -3070,6 +3113,26 @@ class AccountPool(object):
         if not ready:
             return None
         return self._smooth_weighted_pick(ready, "_manual_weights")
+
+    def _pick_free_for_zero_balance(self, snapshot, exclude, model):
+        """免费模型优先交给余额见底的账号，或 None（没有可交的）。
+
+        只在请求的是免费模型（目录 x0.00，账号的 free_models 已由
+        apply_daily_credit_limit 推下来）且池子里确有余额见底的账号时生效：
+        这类请求反正不扣积分，让 0 积分账号消化它，付费账号的轮次留给真正
+        会扣积分的请求。同层之间保持普通轮转（同权重），不引入新的加权状态。
+        余额从未抓取的账号不算「见底」，不参与这层也不被它挤掉。
+        """
+        if not model:
+            return None
+        if not any(a.balance_exhausted() for a in snapshot):
+            return None
+        ready = [a for a in snapshot
+                 if a.uid not in exclude and a.balance_exhausted()
+                 and a.ready(model=model)]
+        if not ready:
+            return None
+        return self._rotate_pick(ready, exclude, model)
 
     def _pick_expiring_first(self, snapshot, exclude, model):
         """Serve the in-window accounts first, or None when none can.

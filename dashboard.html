@@ -4547,7 +4547,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         </div>
         <div style="flex:1;min-width:200px">
           <div style="font-size:12px;color:var(--dim);margin-bottom:4px">API Key</div>
-          <select id="agentKeySelect"
+          <select id="agentKeySelect" onchange="agentOnKeyChange()"
                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit"></select>
         </div>
         <div style="flex:1;min-width:200px">
@@ -11521,18 +11521,41 @@ function renderAgentConnForm(){
   const modelSel = document.getElementById('agentModelSelect');
   if(modelSel){
     const prev = modelSel.value;
+    const realms = agentKeyRealms();
     let html = '<option value="">(不指定模型)</option>';
+    let shown = 0;
     AGENT_MODELS.forEach(m => {
       const id = typeof m === 'string' ? m : (m.id || m.model || '');
       if(!id) return;
+      // 模型条目按所选 Key 的出口过滤（后端 realms 标注：intl/cn 独占才标）。
+      // 出口未知（全局 Key / 无绑定）就全列，别悄悄藏掉能用的。
+      const mr = (typeof m === 'object' && m) ? (m.realms || null) : null;
+      if(realms && mr && !mr.includes(realms)) return;
+      shown++;
       const cw = (typeof m === 'object' && m) ? (m.context_window || m.contextWindow || 0) : 0;
-      const label = id + (cw ? ' (' + fmt(cw) + ' ctx)' : '');
+      const realmTag = !mr ? ''
+        : (mr.length > 1 ? ' [通用]' : (mr[0] === 'cn' ? ' [国内]' : ' [国际]'));
+      const label = id + realmTag + (cw ? ' (' + fmt(cw) + ' ctx)' : '');
       html += '<option value="' + esc(id) + '">' + esc(label) + '</option>';
     });
     modelSel.innerHTML = html;
     const wantModel = prev || prefs.model || '';
     if(wantModel && modelSel.querySelector('option[value="' + wantModel.replace(/"/g, '\\"') + '"]')) modelSel.value = wantModel;
+    if(!shown) html = html; // 全被过滤时不特殊处理，保留下拉为空的事实
   }
+}
+
+// 所选 Key 绑定的出口（"cn"/"intl"/"" 未绑定/未选全局）。
+function agentKeyRealms(){
+  const sel = document.getElementById('agentKeySelect');
+  if(!sel || !sel.value) return '';      // 全局 Key：不筛
+  const k = (AGENT_KEYS || []).find(x => String(x.id) === sel.value);
+  if(!k) return '';
+  return k.realm || '';
+}
+function agentOnKeyChange(){
+  renderAgentConnForm();
+  agentPersistPrefs();
 }
 
 function renderAgentManualUrls(){
