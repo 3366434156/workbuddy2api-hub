@@ -51,8 +51,51 @@ WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
 WEB_TURN_ATTEMPTS = 3
 
 
+class TLSVerifyError(RuntimeError):
+    """The upstream certificate chain is not trusted by this process."""
+
+
+TLS_VERIFY_HINT = (
+    "TLS 证书校验失败：上游证书链里有本机不信任的证书。常见于公司代理、"
+    "Clash/Surge 等 HTTPS 解密，或 macOS 上 Python 没读到系统钥匙串里的根证书。"
+    "把签发该证书的根证书导出为 PEM，设置环境变量 "
+    "WB_CA_BUNDLE=/path/to/ca.pem 后重启网关；也可以设置 SSL_CERT_FILE。"
+)
+
+
+def is_tls_verify_error(exc):
+    """True for certificate/hostname verification failures.
+
+    These are configuration errors, not transient network faults: retrying the
+    same request produces the same result and hides the real cause behind a
+    502. The check looks at URLError.reason as well, because urllib wraps the
+    original SSLCertVerificationError there.
+    """
+    reason = getattr(exc, "reason", None)
+    text = "%s %s %s" % (type(exc).__name__, exc, "" if reason is None else reason)
+    lower = text.lower()
+    return any(marker in lower for marker in (
+        "certificate_verify_failed",
+        "certificate verify failed",
+        "self-signed certificate",
+        "self signed certificate",
+        "unable to get local issuer certificate",
+        "unable to get issuer certificate",
+        "certificate has expired",
+        "hostname mismatch",
+    ))
+
+
+def tls_verify_hint(exc=None):
+    if exc is None:
+        return TLS_VERIFY_HINT
+    return "%s 原始错误：%s" % (TLS_VERIFY_HINT, exc)
+
+
 def _retryable(exc):
     """Transient network faults worth another attempt (TLS resets, timeouts, 5xx)."""
+    if is_tls_verify_error(exc):
+        return False
     if isinstance(exc, ssl.SSLError):
         return True
     if isinstance(exc, urllib.error.HTTPError):
@@ -129,10 +172,15 @@ def urlopen(req, timeout=30, proxy=""):
 
     urllib 的 AbstractHTTPHandler.do_open 会写死 Connection: close，每个请求都得
     重新 TCP+TLS 握手（真机实测 118.0ms，是请求路径上最大的一笔开销）。默认改走
-    wb_upstream_pool：按（目标, 代理串）分池复用连接。不能逐字节对齐 urllib 语义
-    的请求（非 http(s) 目标、非 HTTP 代理、需要跟随的 3xx 重定向）由 PoolBypass
-    回退到下面这条原来的路，行为与改动前一致；WB_UPSTREAM_KEEPALIVE=0 时整条
-    路径都与改动前相同。
+    wb_upstream_pool：按（目标, 代理串, 凭据摘要）分池复用连接——不同账号不共用
+    同一条 TCP/TLS 连接，同一账号仍复用。不能逐字节对齐 urllib 语义的请求（非
+    http(s) 目标、非 HTTP 代理、需要跟随的 3xx 重定向）由 PoolBypass 回退到下面
+    这条原来的路，行为与改动前一致；WB_UPSTREAM_KEEPALIVE=0 时整条路径都与改动
+    前相同。
+
+    头名保真：调用方若把有序 [(name, value)] 挂在 req.wb_exact_headers 上，
+    池路径会原样发这些头名（见 wb_proxy.open_upstream）；没挂的请求（billing /
+    登录 / 签到等）走原来的 .title() 路径，行为不变。
     """
     if wb_upstream_pool.enabled():
         try:
@@ -172,6 +220,8 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
             if log:
                 log("network retry %d/%d after %s" % (attempt, attempts, exc))
             time.sleep(backoff * attempt)
+    if last is not None and is_tls_verify_error(last):
+        raise TLSVerifyError(tls_verify_hint(last)) from last
     raise last
 
 REALM_CONFIGS = {
@@ -181,20 +231,26 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.workbuddy.ai",
         "origin": "https://www.workbuddy.ai",
         "domain": "www.workbuddy.ai",
-        "chat_ua": "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2",
-        "billing_ua": "WorkBuddy/5.5.2",
+        # 5.8.4 实测（2026-10-16 抓包）：桌面端 UA 是三段式，末段是客户端内置
+        # CLI 的版本；取值与 wb_identity.DESKTOP_UA_INTL 保持同一来源。
+        "chat_ua": wb_identity.DESKTOP_UA_INTL,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_INTL,
         "info_filename": "workbuddy-desktop-ai.info",
         "cache_dir_name": ".workbuddy-ai",
         "has_checkin": False,
     },
     "cn": {
         "name": "国内版 (China)",
-        "chat_upstream": "https://copilot.tencent.com",
+        # 默认 https://copilot.tencent.com；WB_CN_CHAT_UPSTREAM 可覆盖（见 wb_identity.CN_CHAT_BASE）。
+        # domain 不随之改：它是 X-Domain 的兜底值，请求优先用账号自己的 domain。
+        "chat_upstream": wb_identity.CN_CHAT_BASE,
         "billing_upstream": "https://www.codebuddy.cn",
         "origin": "https://www.codebuddy.cn",
         "domain": "copilot.tencent.com",
-        "chat_ua": "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
-        "billing_ua": "WorkBuddy/5.5.6",
+        # 国内版没有对应抓包，取值维持原样，但同样从 wb_identity 取，
+        # 免得两处各写一份（国际版 5.8.4 对齐时就漏改过 intl 那一份）。
+        "chat_ua": wb_identity.DESKTOP_UA_CN,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_CN,
         "info_filename": "workbuddy-desktop.info",
         "cache_dir_name": ".workbuddy",
         "has_checkin": True,
@@ -216,7 +272,10 @@ ENTERPRISE_USAGE_PATH = "/billing/meter/get-enterprise-user-usage"
 LOGIN_PENDING = 11217
 LOGIN_TTL_SECONDS = 600
 USER_AGENT = REALM_CONFIGS['intl']['chat_ua']
-DEFAULT_UA_VERSION = '5.5.2'
+#: 国际版桌面端的版本号。以前这里硬编码 5.5.2，和 wb_identity 的
+#: DESKTOP_VERSION_INTL 各写一份，改版本时容易只改一处（5.8.4 对齐时
+#: 就漏了这个常量）。现在统一从 wb_identity 取，保持单一来源。
+DEFAULT_UA_VERSION = wb_identity.DESKTOP_VERSION_INTL
 
 def get_realm_config(realm):
     return REALM_CONFIGS.get(realm) or REALM_CONFIGS["intl"]
@@ -266,6 +325,29 @@ FREE_CAP_MODELS = {
     "intl": frozenset({"hy4-preview-f", "hy3", "deepseek-v4.1-flash"}),
     "cn": frozenset({"hy4-preview-f", "hy3"}),
 }
+
+
+def normalise_disabled_models(raw):
+    """把「人工禁用的模型名单」归一成干净的 list[str]。
+
+    供账号档加载与面板写入两条路共用，保证「内存里的判断」和「落盘的内容」
+    口径一致：保留非空字符串、按小写归一（与 is_model_banned 同口径）、去重、
+    保持输入顺序。非列表输入一律当作「没配」返回空列表——坏数据不至于让账号
+    加载失败。
+    """
+    out = []
+    if not isinstance(raw, (list, tuple)):
+        return out
+    seen = set()
+    for mid in raw:
+        if not isinstance(mid, str):
+            continue
+        m = mid.strip().lower()
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        out.append(m)
+    return out
 
 
 def is_free_cap_model(realm, model):
@@ -441,6 +523,12 @@ except (TypeError, ValueError):
 DEGRADE_THRESHOLD = 5           # consecutive unknown failures before degrading
 DEGRADE_COOLDOWN = 600.0        # first degrade window: 10 minutes
 DEGRADE_COOLDOWN_MAX = 7200.0   # ... doubling up to 2 hours
+# 上游账号级风控限制（HTTP 403 / code 11140「账号存在异常行为，已被限制使用」）
+# 的冷却时长。上游按小时到工作日计：社区复盘里官方工单给的口径是「临时风控
+# 1-3 个工作日自动解除」，期间官方客户端同样报这个错，所以这不是内容审核、
+# 也不能靠换提示词或换号解决。取 2 小时作第一档，到期再试一次即可。
+# 与其它冷却不同，这个期限是**持久化**的（见 note_restricted）。
+RESTRICTED_ACCOUNT_COOLDOWN = 7200.0
 
 
 def _exponential_backoff(count, base, cap, offset):
@@ -532,6 +620,18 @@ class Account(object):
         # 写过，超长截断，别让一条长备注把账号行撑爆。
         raw_note = data.get("note")
         self.note = (raw_note if isinstance(raw_note, str) else "").strip()[:200]
+        # 该账号**人工**禁用的模型名单（面板 / 接口配置）。与 weight、note 同款：
+        # 随凭证档持久化 —— 这是使用者的明确意图，不该在重启后悄悄回到默认。
+        #
+        # 与 model_cooldowns / model_caps 那些**自动**节流区分开：那些表达「暂时
+        # 不该用」（限流或额度撞线的恢复窗口），这里表达「这个号就别碰这几个
+        # 模型」。典型用途：某个号在某些模型上有授权/合规限制，但同一个模型还想
+        # 走别的号——那就禁这一对组合，而不是把整个号停掉。
+        #
+        # 模型 id 统一**小写**存储与比较（与 is_model_banned 的口径一致），
+        # 只做精确匹配不做前缀：行为可预期，不会误伤同前缀的其他模型。
+        raw_deny = data.get("disabledModels")
+        self.disabled_models = normalise_disabled_models(raw_deny)
         # Live error state, never restored from the credential file: the label
         # describes the last upstream answer, not the credential. It used to be
         # persisted and read back, so a 429 that had long since recovered came
@@ -545,6 +645,18 @@ class Account(object):
         # it has always had; never persisted, never exported.
         self.last_error_detail = ""
         self.cooldown_until = 0.0
+        # 运行时标记：上游返回 401 或 token 为空时置为 True，提示需重新登录
+        self.token_expired = bool(not self.access_token)
+        # 上游账号级风控限制（403 / code 11140「账号存在异常行为，已被限制
+        # 使用」）的解除时刻。与上面那些节流窗口不同，这一条**持久化**：上游的
+        # 限制按小时到工作日计，网关重启 / 换身分 / 刷新 token 都不能让它重新
+        # 入池——否则同一台设备上的账号会被一个个送进风控（见 note_restricted
+        # 与社区复盘「解封前严禁换号继续打同一设备」）。
+        self.restricted_until = 0.0
+        try:
+            self.restricted_until = max(0.0, float(data.get("restrictedUntil") or 0))
+        except (TypeError, ValueError):
+            self.restricted_until = 0.0
         # Per-model throttling. Upstream rate limits (code 6004 "usage exceeds
         # frequency limit") apply to ONE model for one account, not to the whole
         # account: other models keep working. Cooldown the offending model only,
@@ -575,6 +687,8 @@ class Account(object):
         self.degrade_until = 0.0
         # 最近一次记失败的时刻：FAIL_WINDOW 用它判断「连续」是否还成立。
         self.last_fail_at = 0.0
+        # 最近一次软限流（429）的时刻：两条软限流阶梯用同一个时间窗。
+        self.last_soft_at = 0.0
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
@@ -654,6 +768,11 @@ class Account(object):
         # result. Separate from _refresh_lock (token refresh) and _save_lock
         # (file write) so the three never nest into each other.
         self._credits_lock = threading.Lock()
+        # Guards the local estimate written by consume_credit(). Kept apart
+        # from _credits_lock because that one is held across a network call:
+        # a request finishing while a refresh is in flight must not wait for
+        # the upstream round-trip just to subtract its own spend.
+        self._balance_lock = threading.Lock()
         # The dashboard snapshots this state while request threads update it.
         # Keep it separate from _refresh_lock, which spans network requests.
         self._throttle_lock = threading.Lock()
@@ -683,8 +802,13 @@ class Account(object):
             "enabled": self.enabled,
             "weight": self.weight,
             "note": self.note,
+            "disabledModels": list(self.disabled_models),
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
+            # 持久化：上游风控限制按小时到工作日计，重启后仍然成立（见
+            # note_restricted）。导出的文档会带上它供查看，导入侧
+            # normalise_import_row() 不认这个字段，换机器不会把账号一起停掉。
+            "restrictedUntil": self.restricted_until,
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
@@ -698,7 +822,10 @@ class Account(object):
         with self._throttle_lock:
             error = self.last_error
             detail = self.last_error_detail
-            deadline = max(self.cooldown_until, self.balance_until, self.breaker_until, self.degrade_until)
+            deadline = max(self.cooldown_until, self.balance_until,
+                           self.breaker_until, self.degrade_until,
+                           self.restricted_until)
+            restricted = self.restricted_until
             active = [(model, until) for model, until in self.model_cooldowns.items()
                       if until > now]
         active.sort(key=lambda pair: (pair[1], pair[0]))
@@ -715,7 +842,7 @@ class Account(object):
             if self.cap_until(model, now) > 0:
                 entry["cappedAt"] = int(self.model_caps[model]["at"])
             models.append(entry)
-        return error, deadline, models, detail
+        return error, deadline, models, detail, restricted
 
     def model_cooldowns_snapshot(self):
         """Active model cooldowns, ordered by recovery time (epoch seconds)."""
@@ -724,7 +851,9 @@ class Account(object):
     def public(self):
         exp = self.expires_at or jwt_exp(self.access_token)
         now = time.time()
-        last_error, deadline, models, last_error_detail = self._throttle_snapshot(now)
+        is_token_expired = bool(getattr(self, "token_expired", False) or (exp and exp <= now) or not self.access_token)
+        last_error, deadline, models, last_error_detail, restricted = \
+            self._throttle_snapshot(now)
         return {
             "uid": self.uid,
             "nickname": self.nickname or (self.uid[:8] if self.uid else "?"),
@@ -736,16 +865,22 @@ class Account(object):
             "enabled": bool(self.enabled),
             "weight": int(self.weight),
             "note": self.note,
+            "disabledModels": list(self.disabled_models),
             "source": self.source,
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy,
             "expiresAt": exp,
-            "expiresIn": _human_delta(exp - time.time()) if exp else None,
+            "expiresIn": "expired" if is_token_expired else (_human_delta(exp - time.time()) if exp else None),
+            "tokenExpired": is_token_expired,
+            "needRelogin": is_token_expired,
             "hasRefreshToken": bool(self.refresh_token),
             "lastError": last_error,
             "lastErrorDetail": last_error_detail or None,
             "inCooldown": deadline > now,
             "cooldownFor": round(max(0.0, deadline - now)) or None,
+            # 上游账号级风控限制（403 / 11140）：面板据此把账号标成「风控限制」
+            # 而不是普通冷却，并提示去官方渠道申诉而不是换号重试。
+            "restrictedFor": round(max(0.0, restricted - now)) or None,
             "modelCooldowns": models,
             "softStreak": int(self.soft_streak),
             "unscopedStreak": int(self.unscoped_streak),
@@ -873,6 +1008,51 @@ class Account(object):
         if not model or self.model_is_free(model):
             return False
         return self.balance_exhausted()
+
+    def consume_credit(self, amount):
+        """Subtract what this request actually cost from the cached balance.
+
+        The background refresher is the source of truth, but it visits one
+        account per tick (30 minutes by default). On a large pool a balance
+        can therefore be hours old, and reserve_blocked() would keep handing
+        the account out until it reached zero (#442). Every finished request
+        carries the upstream's own ``credit``, so the guard can stay honest
+        between refreshes; the next fetch overwrites this estimate with the
+        real number.
+
+        Never raises: a missing/unknown balance simply stays unknown, and the
+        result is clamped at zero so a single expensive request cannot make
+        the panel show a negative remainder.
+        """
+        try:
+            amount = float(amount or 0)
+        except (TypeError, ValueError):
+            return
+        if amount <= 0:
+            return
+        with self._balance_lock:
+            credits = self.credits
+            if not isinstance(credits, dict):
+                return
+            try:
+                remain = float(credits.get("remain"))
+            except (TypeError, ValueError):
+                return
+            try:
+                used = float(credits.get("used") or 0)
+            except (TypeError, ValueError):
+                used = 0.0
+            try:
+                size = float(credits.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0.0
+            remain = max(0.0, remain - amount)
+            used += amount
+            credits["remain"] = round(remain, 2)
+            credits["used"] = round(used, 2)
+            if size > 0:
+                credits["remain_percent"] = "%.1f%%" % (remain / size * 100.0)
+                credits["used_percent"] = "%.1f%%" % (min(used, size) / size * 100.0)
 
     def soonest_expiring_days(self):
         """Days until the earliest credit package that still has credits left.
@@ -1115,17 +1295,32 @@ class Account(object):
             return "已停用"
         if not self.access_token:
             return "无凭证"
+        if getattr(self, "token_expired", False):
+            return "凭证已过期"
+        # 与 ready() 同序：人工黑名单排在所有「暂时不可用」之前，所以
+        # 「所有账号都禁用了这个模型」时，池子抽干的报错里会逐个号写明原因。
+        if self.model_disabled(model):
+            return "该模型已被人工禁用"
         now = time.time()
         # 四种惩罚的到期时间各走各的，谁把时间推得最远就报谁：只报「冷却」
         # 会让人往 429 的方向查，而实际可能是上游连续断连触发的熔断（30 分钟
         # 起，与账号本身无关），或者余额保护这类完全不同的原因。
-        penalties = [("熔断", self.breaker_until), ("降权", self.degrade_until),
+        penalties = [("上游风控限制", self.restricted_until),
+                     ("熔断", self.breaker_until), ("降权", self.degrade_until),
                      ("余额保护", self.balance_until), ("软限流冷却", self.cooldown_until)]
         if model:
             penalties.append(("模型 %s 冷却" % model, self.model_cooldowns.get(model, 0.0)))
         label, until = max(penalties, key=lambda item: item[1])
         if until > now:
-            return "%s 剩余 %s" % (label, _human_delta(until - now) or "?")
+            # 剩余时间要精确到秒：还剩 42 秒时写「0 min」，读起来就是「已经该能用
+            # 了却还被挡着」——生产日志里那串「软限流冷却 剩余 0 min」就是这么
+            # 来的。连续次数一并带上，才看得出是在升级还是刚开始。
+            streak = ""
+            if label == "软限流冷却" and self.soft_streak > 1:
+                streak = "（连续第 %d 次）" % self.soft_streak
+            elif label.startswith("模型") and self.unscoped_streak > 1:
+                streak = "（连续第 %d 次）" % self.unscoped_streak
+            return "%s 剩余 %s%s" % (label, _human_left(until - now), streak)
         if self.reserve_blocked():
             return "余额低于保留线"
         if self.daily_limit_blocked():
@@ -1139,8 +1334,23 @@ class Account(object):
             return "凭证已过期"
         return ""
 
+    def model_disabled(self, model):
+        """这个账号被人工禁用了该模型？空名单恒为 False。
+
+        与自动节流区分：`model_cooldowns` / `model_caps` 表达「暂时不该用」，
+        这里是使用者明确指定的「这个号就别碰这几个模型」。精确匹配（名单在
+        加载时已按小写归一），不做前缀匹配。
+        """
+        if not model or not self.disabled_models:
+            return False
+        return str(model).strip().lower() in self.disabled_models
+
     def ready(self, model=None):
-        if not self.enabled or not self.access_token:
+        if not self.enabled or not self.access_token or getattr(self, "token_expired", False):
+            return False
+        # 人工黑名单排在最前：它是静态配置（最便宜），而且在语义上优先于所有
+        # 「暂时不可用」的判断 —— 被禁用的模型不该因为账号恰好恢复了就漏进来。
+        if self.model_disabled(model):
             return False
         if self.throttle_wait(model=model) > 0:
             return False
@@ -1180,15 +1390,38 @@ class Account(object):
             return self.refresh()
         return self.refresh()
 
-    def headers(self, purpose="chat"):
+    def is_cli_identity(self):
+        """出站身份是不是官方 CodeBuddy CLI（决定 chat 的 wire 形态）。"""
+        return self.product == wb_identity.PRODUCT_CLI
+
+    def headers(self, purpose="chat", session_key=None, turn_request_id=None,
+                model=None, conversation_id=None):
         """组出这一轮的出站标头。
 
-        chat 用途走 wb_identity（CLI 头 / WorkBuddy 头，可切换）；
+        chat 用途走 wb_identity（CLI 头 / WorkBuddy 头 / VSCode 头，可切换）；
         billing 用途维持原本的轻量标头，计费端点不吃那套身分。
+
+        `model` / `conversation_id` 只对 chat 用途有意义：官方 VSCode 扩展在
+        model 请求上带 `X-Model-ID`（值就是本次 model），`X-Conversation-ID`
+        按会话稳定；计费端点不吃这套身分，两个参数在 billing 路径上被忽略。
 
         chat 标头按 5.8.4 抓包对齐：官方对话请求不带 X-Machine-ID /
         X-Session-ID（那两个只用于反馈上报），所以这里也不再发——之前发的
         是每个账号恒定的派生值，反而是一处「网关特征」。
+
+        CLI 身份另按官方 CodeBuddy CLI 2.168.2 对齐：它的 chat 请求由 OpenAI
+        Node SDK 发出，没有 Origin / Referer / X-CodeBuddy-Request /
+        Accept-Language 这些浏览器头，Accept 就是 application/json；CLI 包里
+        也没有设备 token 逻辑，所以 CLI 身份不发 X-Device-Token。
+
+        session_key / turn_request_id 只影响 CLI 身份（官方 CLI 语义：会话 id
+        按会话稳定、X-Conversation-Request-ID 一轮 user send 内复用），由
+        open_upstream 传进来；桌面端 / VSCode 分支不吃这两个参数，行为不变。
+
+        X-Device-Token 只在**国内版**发送：国内版客户端确实带真实的 Turing
+        Shield 设备 token，国际版客户端则没有这个头（三轮抓包与 5.7.6 / 5.8.4
+        二进制构造器都不含它）。发给国际版账号既是伪造头，也是把多个账号串到
+        同一台设备的关联键（#448）。CLI 身份无论哪个区域都不发。
 
         billing 标头仍带 X-Machine-ID / X-Session-ID，但两个都必须按账号派生：
         网关是一个进程冒充几十台设备，一旦取进程级的值，全部账号就会共用同一个
@@ -1221,7 +1454,8 @@ class Account(object):
                 headers["X-No-Enterprise-Id"] = "1"
             if self.realm == "cn":
                 headers["X-Product"] = "SaaS"
-            device_token = self._device_token()
+            # 官方 CLI 全包没有设备 token 逻辑，CLI 身份一律不发。
+            device_token = self._device_token() if not self.is_cli_identity() else ""
             if device_token:
                 headers["X-Device-Token"] = device_token
             return headers
@@ -1231,22 +1465,45 @@ class Account(object):
             realm=self.realm,
             uid=self.uid,
             token=self.access_token,
+            conversation_id=conversation_id,
             enterprise_id=self.enterprise_id,
             tenant_id=self.enterprise_id,
+            session_key=session_key,
+            turn_request_id=turn_request_id,
+            model=model,
         )
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/plain, */*",
-            "X-Requested-With": "XMLHttpRequest",
-            "Origin": cfg["origin"],
-            "Referer": cfg["origin"] + "/",
-            "X-CodeBuddy-Request": "1",
-            "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
-        }
+        if self.is_cli_identity():
+            # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：浏览器头一个都没有
+            # （X-Requested-With 也没有），Accept 就是 application/json。
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": cfg["origin"],
+                "Referer": cfg["origin"] + "/",
+                "X-CodeBuddy-Request": "1",
+                "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
+            }
         headers.update(identity)
-        device_token = self._device_token()
+        # 国际版不发 X-Device-Token（#448）；国内版保留真实 token 语义。
+        # VSCode 非企业号仍按官方 token || error 的失败态发占位（#431）。
+        device_token = (self._device_token()
+                        if self.realm == "cn" and not self.is_cli_identity()
+                        else "")
         if device_token:
             headers["X-Device-Token"] = device_token
+        elif (self.product == wb_identity.PRODUCT_VSCODE
+              and not self.enterprise_id):
+            # 官方非企业号一定发 token 或 error 二选一（源码实锤：
+            # AgentContextBuilderImpl / buildAuthHeaders 里 token || error）。
+            # hub 没有本机 QIMEI/TuringShield SDK，生成不了真实 token，按官方
+            # 的失败态发 error 占位，而不是两者都不发（那是官方不存在的状态）。
+            headers["X-Device-Token-Error"] = "sdk_not_initialized"
         return headers
 
     def _device_token(self):
@@ -1302,6 +1559,7 @@ class Account(object):
 
     def _refresh_locked(self):
         if not self.refresh_token:
+            self.token_expired = True
             self._set_last_error("no refresh token; sign in again")
             return False
         cfg = get_realm_config(self.realm)
@@ -1326,17 +1584,24 @@ class Account(object):
             payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=30,
                                 proxy=self.proxy)
         except Exception as exc:
-            self._set_last_error("refresh failed: %s" % exc)
+            err_msg = str(exc)
+            if "401" in err_msg or "Authorization" in err_msg or "Unauthorized" in err_msg:
+                self.token_expired = True
+                self._set_last_error("登录已过期 (HTTP 401)，请重新登录")
+            else:
+                self._set_last_error("refresh failed: %s" % exc)
             return False
         data = (payload.get("data") or {})
         data = data.get("data") or data
         token = data.get("accessToken")
         if not token:
+            self.token_expired = True
             self._set_last_error("refresh returned no token (%s)" % payload.get("msg"))
             return False
         self.access_token = token
         self.refresh_token = data.get("refreshToken") or self.refresh_token
         self.expires_at = jwt_exp(token) or self.expires_at
+        self.token_expired = False
         with self._throttle_lock:
             self.last_error = ""
             self.cooldown_until = 0
@@ -1576,17 +1841,32 @@ class Account(object):
         """每日活跃对话的实际流程；返回形状见 daily_chat。"""
         import wb_proxy
         url = self.chat_base_url() + wb_proxy.CHAT_PATH
-        headers = self.headers("chat")
+        model = self.daily_chat_model()
+        headers = self.headers("chat", model=model)
         body = {
-            "model": self.daily_chat_model(),
+            "model": model,
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": True,
             "max_tokens": 10,
             "reasoning_effort": "none",
         }
         req_body = wb_proxy.build_upstream_body(body)
+        # 官方 CLI 的 chat 请求体：gzip + cache_retention（紧凑 JSON 由传输层统一
+        # 处理，本 PR 不重复实现）；桌面端 / VSCode 维持原请求体（VSCode 的
+        # RequestBodyGzip 有 feature 开关、主 chat 是否压仍待抓包确认）。
+        cli_identity = self.is_cli_identity()
+        if cli_identity:
+            req_body = {k: v for k, v in req_body.items()
+                        if k not in wb_identity.CLI_BODY_DROP_FIELDS}
+            req_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
+            headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
         data = json.dumps(req_body, ensure_ascii=False).encode("utf-8")
+        if cli_identity:
+            data = wb_identity.gzip_body(data)
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        # 与 open_upstream 的 chat 路径同口径：头名原样上线（Request.add_header 会
+        # 先 capitalize，所以有序原名单独挂在请求上给池路径用）。
+        req.wb_exact_headers = list(headers.items())
         try:
             with urlopen(req, timeout=20, proxy=self.proxy) as resp:
                 _ = resp.read()
@@ -1812,8 +2092,28 @@ class Account(object):
 
         # 1. 套餐概览
         summary_url = base_billing + RESOURCE_SUMMARY_PATH
-        s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
-                          timeout=15, proxy=self.proxy)
+        try:
+            s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
+                              timeout=15, proxy=self.proxy)
+        except Exception as exc:
+            err_str = str(exc)
+            if "401" in err_str or "Authorization" in err_str or "Unauthorized" in err_str:
+                if self.refresh_token and self.refresh():
+                    headers = self.headers(purpose="billing")
+                    headers["X-Client-Platform"] = "web"
+                    try:
+                        s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
+                                          timeout=15, proxy=self.proxy)
+                    except Exception:
+                        self.token_expired = True
+                        self._set_last_error("登录已过期，请重新登录")
+                        return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+                else:
+                    self.token_expired = True
+                    self._set_last_error("登录已过期，请重新登录")
+                    return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+            else:
+                raise
         if s_res.get("code") != 0:
             return {"ok": False, "error": s_res.get("msg") or f"code {s_res.get('code')}"}
         s_data = s_res.get("data") or {}
@@ -1946,7 +2246,22 @@ class Account(object):
             res = http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
                             timeout=30, proxy=self.proxy)
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            err_str = str(exc)
+            if "401" in err_str or "Authorization" in err_str or "Unauthorized" in err_str:
+                if self.refresh_token and self.refresh():
+                    try:
+                        headers = self.headers(purpose="billing")
+                        res = http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
+                                        timeout=30, proxy=self.proxy)
+                    except Exception:
+                        self.token_expired = True
+                        self._set_last_error("登录已过期，请重新登录")
+                        return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+                else:
+                    self.token_expired = True
+                    self._set_last_error("登录已过期，请重新登录")
+                    return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+            return {"ok": False, "error": err_str}
         data = res.get("data", {}).get("Response", {}).get("Data", {})
         accounts = data.get("Accounts") or []
         packages = []
@@ -2120,6 +2435,13 @@ class Account(object):
                             return ent
                 if res.get("ok"):
                     return res
+                # 若详细接口明确返回认证失败，直接上报，不再尝试 fallback
+                # （fallback 使用相同 token，会得到同样的 401）。
+                err = res.get("error", "")
+                if err and (_auth_failure_text(err) or "登录" in err):
+                    self.token_expired = True
+                    self._set_last_error("登录已过期，请重新登录")
+                    return res
             except Exception:
                 pass
             if self.is_enterprise():
@@ -2144,6 +2466,8 @@ class Account(object):
             # The visible label keeps its existing truncation; `detail` carries the
             # untouched upstream body so the panel can show it on hover.
             self.last_error_detail = str(detail)[:2000] if detail else ""
+            if _auth_failure_text(message):
+                self.token_expired = True
             if model:
                 # Model-scoped throttle: keep the account usable for every other model.
                 wait = max(1.0, float(until) - time.time()) if until else (
@@ -2156,6 +2480,32 @@ class Account(object):
                 return
             actual_cooldown = 3 if single_account else cooldown
             self.cooldown_until = time.time() + actual_cooldown
+
+    def note_restricted(self, detail="", cooldown=None):
+        """上游账号级风控限制（403 / code 11140）：按小时冷却，且不随重启消失。
+
+        实测正文：{"code":11140,"msg":"request illegal",...,"displayMsg":
+        「账号存在异常行为，已被限制使用」}。官方客户端同样报这个错，说明是
+        账号级标记而不是请求内容（magpie #1849 的对照：同一请求同一套头，有的
+        账号 200、有的 403）。社区复盘（Zhengyuuuui/workbuddy2api 封禁事件）
+        给出的处置口径是：看到 11140 立即停手，解封前严禁换号继续打同一台设备，
+        否则设备指纹会连坐。
+
+        与普通冷却的区别：
+        - 固定 2 小时（可用 cooldown 覆盖），不吃 single_account 的 3 秒兜底——
+          把被限制的账号每 3 秒再试一次，只会继续喂上游风控；
+        - 持久化到凭据档（restrictedUntil）：重启 / 刷新 token / 换身分 /
+          「一键测试」都不会把它清掉，只有真正成功一次（说明上游已解除）才清。
+        """
+        now = time.time()
+        wait = RESTRICTED_ACCOUNT_COOLDOWN if cooldown is None else float(cooldown)
+        with self._throttle_lock:
+            self.last_error = "HTTP 403 (account restricted)"
+            self.last_error_detail = str(detail)[:2000] if detail else ""
+            # 第一次命中才起算：反复探测/重试不该把 2 小时越推越长。
+            if self.restricted_until <= now:
+                self.restricted_until = now + max(1.0, wait)
+        return self.restricted_until
 
     def note_balance_cooled(self, message="insufficient credits"):
         """402 / out of credits: park until the next local 04:00.
@@ -2196,11 +2546,26 @@ class Account(object):
     def note_soft_rate(self, message):
         """Account-level rate limit: soft cooldown with exponential backoff."""
         with self._throttle_lock:
+            self._decay_soft_streak()
             self.soft_streak += 1
             wait = soft_backoff(self.soft_streak)
             self.last_error = str(message)[:200]
             self.cooldown_until = max(self.cooldown_until, time.time() + wait)
         return wait
+
+    def _decay_soft_streak(self):
+        """软限流阶梯也要有时间窗（调用方已持有 _throttle_lock）。
+
+        这两条阶梯原先只加不减、只有成功才归零：昨天被限过 3 次，今天第一个
+        429 就直接从 2400s 起步，后天起步更高，直到 7200s 封顶——账号明明已经
+        恢复正常（面板测试通过），却动不动被按几十分钟到两小时，这正是「不断
+        软限流」的另一半。窗口内才算连续，隔得久就回到第一档（600s / 60s）。
+        """
+        now = time.time()
+        if FAIL_WINDOW and self.last_soft_at and now - self.last_soft_at > FAIL_WINDOW:
+            self.soft_streak = 0
+            self.unscoped_streak = 0
+        self.last_soft_at = now
 
     def note_unscoped_rate(self, model):
         """An unscoped soft 429: grow its own streak, return this model's window.
@@ -2213,6 +2578,7 @@ class Account(object):
         request clears both through note_success().
         """
         with self._throttle_lock:
+            self._decay_soft_streak()
             self.unscoped_streak += 1
             return unverified_soft_backoff(self.unscoped_streak)
 
@@ -2255,7 +2621,13 @@ class Account(object):
         return self.degrade_until
 
     def note_success(self, model=None):
-        """A served request clears every account-level penalty."""
+        """A served request clears every account-level penalty.
+
+        That includes a persisted upstream restriction: a request that actually
+        succeeded is the one piece of evidence that the vendor lifted it. (In
+        normal dispatch a restricted account is never picked, so this only fires
+        from a manual test.)
+        """
         with self._throttle_lock:
             if model:
                 self.model_cooldowns.pop(model, None)
@@ -2265,8 +2637,10 @@ class Account(object):
             self.fails = 0
             self.degrade_count = 0
             self.last_fail_at = 0.0
+            self.last_soft_at = 0.0
             self.breaker_until = 0.0
             self.degrade_until = 0.0
+            self.restricted_until = 0.0
             self.last_error = ""
             self.last_error_detail = ""
             self.cooldown_until = 0.0
@@ -2278,7 +2652,8 @@ class Account(object):
         now = time.time()
         with self._throttle_lock:
             wait = max(0.0, self.cooldown_until - now,
-self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
+                       self.balance_until - now, self.breaker_until - now,
+                       self.degrade_until - now, self.restricted_until - now)
             if model:
                 wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
         return wait
@@ -2311,6 +2686,21 @@ self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
                 self.last_error_detail = ""
                 self.cooldown_until = 0
                 self.balance_until = 0.0
+            # 上游账号级风控限制（restricted_until）故意不在这里清：它不是本机
+            # 记的限流窗口，而是上游对账号的标记；换身分 / 重试 / 刷新都不该把
+            # 它放回池子（见 note_restricted）。
+
+    def clear_model_cooldown(self, model):
+        """只解除某个模型的限流，账号级状态原样保留。
+
+        额度窗口探针（wb_window_probe）用它：探针证明该模型这条配额线已经
+        重置，但这不等于账号本身恢复——一次网络故障留下的 cooldown_until
+        不该被顺手清掉，否则 60 秒的账号冷却会被探针提前解除。
+        """
+        if not model:
+            return
+        with self._throttle_lock:
+            self.model_cooldowns.pop(model, None)
 
 def _human_delta(seconds):
     if seconds is None: return None
@@ -2320,6 +2710,41 @@ def _human_delta(seconds):
     hours = seconds / 3600.0
     if hours >= 1: return "%.1f hours" % hours
     return "%d min" % int(seconds / 60)
+
+
+def _auth_failure_text(text):
+    """True for a credential-shaped 401, not an intermediate proxy page.
+
+    A bare 401 from openresty / nginx (an HTML error page) is not evidence
+    that the token is dead: parking the account on it would take a healthy
+    credential out of rotation until a manual re-login (#435). Only mark the
+    account when the failure itself names authorization.
+    """
+    lower = str(text or "").lower()
+    if "<html" in lower:
+        return False
+    return ("401" in lower or "unauthorized" in lower or "authorization" in lower
+            or "token expired" in lower or "invalid_token" in lower)
+
+
+def _human_left(seconds):
+    """还剩多久，精确到秒（对外解释「为什么现在不能用」时用）。
+
+    `_human_delta` 是给凭据有效期那种以天计的场景用的，小于一分钟一律写
+    「0 min」；而冷却/熔断的剩余时间经常就是几十秒，写成 0 分钟会让人以为
+    账号已经可用、网关还在挡它。
+    """
+    secs = max(0, int(round(seconds)))
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        m, s = divmod(secs, 60)
+        return "%dm%02ds" % (m, s) if s else "%dm" % m
+    if secs < 86400:
+        h, rem = divmod(secs, 3600)
+        m = rem // 60
+        return "%dh%02dm" % (h, m) if m else "%dh" % h
+    return "%.1f days" % (secs / 86400.0)
 
 class SessionAffinity(object):
     """Which upstream account served a conversation, so the next turn can go
@@ -2564,6 +2989,18 @@ class CreditsRefresher(threading.Thread):
             "logs": self.logs[-10:],
         }
 
+# 和账号凭证放在同一个目录、但本身不是账号的文件。跳过它们，免得每次启动
+# 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
+# active_realm.json 是区域开关）。
+NON_ACCOUNT_FILES = ("settings.json", "active_realm.json")
+
+
+# 和账号凭证放在同一个目录、但本身不是账号的文件。跳过它们，免得每次启动
+# 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
+# active_realm.json 是区域开关，model_windows.json 是额度窗口记录，
+# quota_scan.json 是主动额度查询记录）。
+NON_ACCOUNT_FILES = ("settings.json", "active_realm.json", "model_windows.json", "quota_scan.json")
+
 
 class AccountPool(object):
     def __init__(self, directory, log=None):
@@ -2599,7 +3036,7 @@ class AccountPool(object):
             self.accounts = []
             if not os.path.isdir(self.dir): return self.accounts
             for name in sorted(os.listdir(self.dir)):
-                if not name.endswith(".json"): continue
+                if not name.endswith(".json") or name in NON_ACCOUNT_FILES: continue
                 path = os.path.join(self.dir, name)
                 try:
                     with open(path, encoding="utf-8") as fh:
@@ -2657,6 +3094,10 @@ class AccountPool(object):
                     account.proxy_slot = existing.proxy_slot
                 if not account.proxy_legacy and existing.proxy_legacy:
                     account.proxy_legacy = existing.proxy_legacy
+                account.token_expired = False
+                with account._throttle_lock:
+                    account.last_error = ""
+                    account.last_error_detail = ""
                 self.accounts[self.accounts.index(existing)] = account
             else:
                 self.accounts.append(account)
@@ -2781,6 +3222,23 @@ class AccountPool(object):
         if account is None:
             return None
         account.note = str(note or "").strip()[:200]
+        account.save(self.dir)
+        return account.public()
+
+    def set_disabled_models(self, uid, models):
+        """设置该账号**人工**禁用的模型名单，落盘并回公共视图。
+
+        语义：这些模型不再派给这个账号。不影响该账号的其他模型，也不影响其他
+        账号对同一模型的可用性 —— 请求会自动落到池子里别的号上。传空列表 =
+        清空禁用、恢复原行为。
+
+        名单按 normalise_disabled_models 归一；坏输入退化成空列表（= 不禁用）
+        而不是抛错：面板传进来什么形状都不该让一个账号加载失败。
+        """
+        account = self.get(uid)
+        if account is None:
+            return None
+        account.disabled_models = normalise_disabled_models(models)
         account.save(self.dir)
         return account.public()
 
@@ -3335,6 +3793,36 @@ class AccountPool(object):
             for account in candidates:
                 if account.access_token: return account
             return candidates[0] if candidates else None
+
+    def find_unique(self, ref):
+        """Resolve a pinned-route ref to exactly one account.
+
+        Order: exact uid, unique nickname, unique uid prefix. A tier with more
+        than one match is ambiguous; the caller must report it, never guess.
+        Returns (account, reason) where reason is "" on success or a short
+        message fragment such as "was not found" / "is ambiguous".
+        """
+        ref = str(ref or "").strip()
+        if not ref:
+            return None, "was not found"
+        with self._lock:
+            accounts = list(self.accounts)
+        exact = [a for a in accounts if str(a.uid or "") == ref]
+        if len(exact) == 1:
+            return exact[0], ""
+        if len(exact) > 1:
+            return None, "is ambiguous"
+        named = [a for a in accounts if str(a.nickname or "").strip() == ref]
+        if len(named) == 1:
+            return named[0], ""
+        if len(named) > 1:
+            return None, "is ambiguous"
+        prefixed = [a for a in accounts if str(a.uid or "").startswith(ref)]
+        if len(prefixed) == 1:
+            return prefixed[0], ""
+        if len(prefixed) > 1:
+            return None, "is ambiguous"
+        return None, "was not found"
 
     def start_login(self, realm="intl", platform="CLI"):
         cfg = get_realm_config(realm)
