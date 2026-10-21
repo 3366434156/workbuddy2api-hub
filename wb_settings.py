@@ -109,6 +109,13 @@ UPDATE_CHECK_STATE_KEY = "update_check"
 # 取舍（那些组合会明显多接流量），所以老安装保持原样的纯轮询。
 REMAINING_PRIORITY_ENABLED_KEY = "remaining_priority_enabled"
 
+# 风控连坐保护的总开关（默认开）：窗口内 >=2 个账号被上游 403/11140 限制时，
+# 整个区域暂停派发（默认 1800s），避免继续换号把同设备的账号连坐封掉（#422
+# 一次封 7 个号的社区复盘）。关掉后行为回到「只冷却被限的那个账号、继续换号
+# 轮转」——适合账号本就分散在不同设备/出口的部署，或操作者自己愿意承担连坐
+# 风险换可用性（agent 收到 429 终止整轮任务的损失更大时）。
+RESTRICTION_HOLD_ENABLED_KEY = "restriction_hold_enabled"
+
 # 出口级瞬时失败退避（issue #271）：传输类失败与 502/503/504 不再进账号级熔断
 # 计数，改记在出口上、退避降到秒级（见 wb_egress）。缺失键读作关：它改变的是
 # 派发路径上的失败归账与退避尺度，老安装保持原样（传输错误仍喂账号熔断）。
@@ -1856,6 +1863,25 @@ def set_remaining_priority_enabled(accounts_dir, enabled):
     with _lock:
         data = load(accounts_dir)
         data[REMAINING_PRIORITY_ENABLED_KEY] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def restriction_hold_enabled(accounts_dir):
+    """Whether a 11140 wave pauses the whole realm's dispatch. Default on.
+
+    缺失键读作开（is not False）：保护是安全默认，老安装不受影响；只有显式
+    False 才关。
+    """
+    return load(accounts_dir).get(RESTRICTION_HOLD_ENABLED_KEY) is not False
+
+
+def set_restriction_hold_enabled(accounts_dir, enabled):
+    """Persist the restriction-hold switch. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data[RESTRICTION_HOLD_ENABLED_KEY] = enabled
         save(accounts_dir, data)
     return enabled
 

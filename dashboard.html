@@ -5069,6 +5069,27 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">风控连坐暂停 <em id="setRestrictionHoldState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              上游返回 403 / code 11140（账号存在异常行为）时，窗口内达到 2 个账号即视为设备级连坐清扫：整个区域暂停派发 30 分钟，避免继续换号把同设备账号一起封掉（社区实测一次封 7 个号）。默认开启——少服务一会儿，别把账号送走。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              关闭后：被限账号只冷却自己（restrictedUntil），请求继续换其他账号轮转。agent 任务不再因 429「account restriction」终止；代价是若上游真在做设备级清扫，继续换号可能连坐更多账号——账号分散在不同设备/出口的部署更适合关闭。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setRestrictionHold" type="checkbox" style="width:16px;height:16px">
+              启用连坐暂停
+            </label>
+            <button onclick="saveRestrictionHold(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">模型额度窗口探针 <em id="setWindowProbeState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               上游的免费额度窗口按「首次请求」起算：某账号在某模型上被限流（429）后，上游会给出一个重置时刻。开启后，网关会在该时刻到点主动补一个最小请求，把新一轮窗口的计时起点钉在重置那一刻——否则要等到下一次真实请求窗口才开始计时，额度白白空转。默认开启。
@@ -11144,6 +11165,14 @@ async function loadSettings(showToast){
         remainingPriorityState.textContent = remainingPriority ? '(已启用)' : '(未启用)';
         remainingPriorityState.style.color = remainingPriority ? 'var(--accent2)' : 'var(--dim)';
       }
+      const restrictionHold = data.restriction_hold_enabled !== false;
+      const restrictionHoldInput = document.getElementById('setRestrictionHold');
+      if(restrictionHoldInput) restrictionHoldInput.checked = restrictionHold;
+      const restrictionHoldState = document.getElementById('setRestrictionHoldState');
+      if(restrictionHoldState){
+        restrictionHoldState.textContent = restrictionHold ? '(已启用)' : '(已关闭：换号继续)';
+        restrictionHoldState.style.color = restrictionHold ? 'var(--accent2)' : 'var(--warn)';
+      }
       const windowProbe = data.window_probe !== false;
       const windowProbeInput = document.getElementById('setWindowProbe');
       if(windowProbeInput) windowProbeInput.checked = windowProbe;
@@ -12266,6 +12295,22 @@ async function saveLocalWebTools(btn){
   try {
     await postJSON('/settings/save', {local_web_tools: value});
     toast(value ? '已启用：由网关代跑 web_search / web_fetch' : '已关闭：工具声明原样透传', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveRestrictionHold(btn){
+  const el = document.getElementById('setRestrictionHold');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {restriction_hold_enabled: value});
+    toast(value ? '已启用：11140 连坐时整区暂停派发（安全默认）'
+                : '已关闭：11140 只冷却该账号，请求继续换号轮转', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

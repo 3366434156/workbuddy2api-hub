@@ -10160,6 +10160,8 @@ def runtime_settings_view():
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
         "remaining_priority_enabled":
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
+        "restriction_hold_enabled":
+            wb_settings.restriction_hold_enabled(ACCOUNTS_DIR),
         "egress_backoff_enabled":
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
         "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
@@ -13923,6 +13925,10 @@ def note_account_restriction(realm, uid="", now=None):
     按设备 / 出口做连坐清扫：把整个区域暂停 RESTRICTION_HOLD_SECONDS，期间
     不再向上游发任何请求（open_upstream 直接快速失败），等人工确认或时间到
     再恢复。按 uid 去重，所以同一个号被反复探测 / 测试不会把暂停骗出来。
+
+    面板开关（wb_settings.restriction_hold_enabled，默认开）关掉时不启动
+    整池暂停——事件照记（观测用），处置回落到「只冷却被限账号、继续换号
+    轮转」，由操作者自行承担连坐风险换可用性。
     """
     now = time.time() if now is None else now
     uid = str(uid or "").strip() or "-"
@@ -13933,6 +13939,11 @@ def note_account_restriction(realm, uid="", now=None):
         _RESTRICTION_EVENTS[realm] = events
         if len(events) < RESTRICTION_WAVE_MIN or RESTRICTION_HOLD_SECONDS <= 0:
             return 0.0
+        try:
+            if not wb_settings.restriction_hold_enabled(ACCOUNTS_DIR):
+                return 0.0
+        except Exception:
+            pass  # 设置读不到按保护开着处理
         until = max(_RESTRICTION_HOLD.get(realm, 0.0),
                     now + RESTRICTION_HOLD_SECONDS)
         _RESTRICTION_HOLD[realm] = until
@@ -14198,9 +14209,17 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 失败、一个上游请求都不发——继续打只会把同一台设备上的其他账号也送走。
     hold = restriction_hold_remaining(realm)
     if hold > 0:
-        raise RateLimited(None, "upstream account restriction in effect",
-                          wait=int(hold) + 1,
-                          message=restriction_hold_message(realm, hold))
+        try:
+            hold_on = wb_settings.restriction_hold_enabled(ACCOUNTS_DIR)
+        except Exception:
+            hold_on = True
+        if hold_on:
+            raise RateLimited(None, "upstream account restriction in effect",
+                              wait=int(hold) + 1,
+                              message=restriction_hold_message(realm, hold))
+        # 开关已被关掉：清掉残留的暂停，立刻恢复轮转（acct 冷却仍在）。
+        with _RESTRICTION_LOCK:
+            _RESTRICTION_HOLD.pop(realm, None)
     # 复用调用方已建好的 body：/v1/chat/completions 在进这里之前已经 build 过
     # 一次（那次的产物只用于一行日志和 prompt_fingerprint），此前这里会为同一
     # 个 payload 再建一遍，大请求实测白付 ~13.6ms/请求。403 降级重试时仍按
@@ -14547,8 +14566,15 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     # 就停手，下一次请求自然会落到别的账号；不再把同一条请求
                     # 原样复制到池里每个账号——那正是「一封全封」的放大器。
                     # 需要旧行为（透明换号）时把 WB_RESTRICTED_403_ROTATE_MAX
-                    # 调大即可。
-                    if restricted_rotations >= RESTRICTED_403_ROTATE_MAX:
+                    # 调大即可。面板的「风控连坐暂停」开关关掉 = 操作者明确选择
+                    # 继续轮转：ROTATE_MAX=0 的停手被跳过，换号继续（账号自身
+                    # 的 restrictedUntil 冷却仍生效，被限的号不会再被选中）。
+                    try:
+                        rotate_on = not wb_settings.restriction_hold_enabled(
+                            ACCOUNTS_DIR)
+                    except Exception:
+                        rotate_on = False
+                    if restricted_rotations >= RESTRICTED_403_ROTATE_MAX                             and not rotate_on:
                         break
                     restricted_rotations += 1
                     continue
@@ -19421,6 +19447,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_remaining_priority_enabled(ACCOUNTS_DIR, raw)
             reply["remaining_priority_enabled"] = raw
+        if "restriction_hold_enabled" in payload:
+            # 风控连坐暂停（默认开）。关掉 = 11140 只冷却被限账号、继续换号
+            # 轮转——操作者自己承担连坐风险换可用性。
+            raw = payload.get("restriction_hold_enabled")
+            if not isinstance(raw, bool):
+                return self._error(400, "restriction_hold_enabled must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_restriction_hold_enabled(ACCOUNTS_DIR, raw)
+            reply["restriction_hold_enabled"] = raw
         if "egress_backoff_enabled" in payload:
             # 出口级瞬时失败退避（issue #271）：与 remaining_priority_enabled
             # 同一形状——严格 JSON 布尔，字符串 "false" 会是真值。

@@ -301,6 +301,54 @@ class Restricted403DispatchTests(unittest.TestCase):
         finally:
             wb_accounts.urlopen = real_urlopen
 
+    def test_panel_toggle_off_lets_rotation_continue(self):
+        # 面板「风控连坐暂停」关掉：11140 不再整池暂停，请求继续换号轮转，
+        # 被限账号自身仍带 restrictedUntil 冷却（不会再被选中）。
+        import wb_settings
+        first = make_account("a1")
+        second = make_account("b1")
+        P.POOL = StubPool([first, second])
+        upstream = ScriptedUpstream([http_error(403, RESTRICT_BODY),
+                                     FakeResp()])
+        real_urlopen = wb_accounts.urlopen
+        real_hold = wb_settings.restriction_hold_enabled
+        wb_accounts.urlopen = upstream
+        wb_settings.restriction_hold_enabled = lambda d: False
+        try:
+            response, _raised, _up = self._run(
+                [first, second],
+                [http_error(403, RESTRICT_BODY), FakeResp()])
+            self.assertEqual(P.restriction_hold_remaining("intl"), 0.0,
+                             "面板开关关掉后不得启动整池暂停")
+            self.assertGreater(first.restricted_until, time.time(),
+                               "被限账号自身的冷却仍然生效")
+        finally:
+            wb_accounts.urlopen = real_urlopen
+            wb_settings.restriction_hold_enabled = real_hold
+
+    def test_panel_toggle_on_keeps_the_pause(self):
+        # 默认（开）：两个号被限 → 整池暂停（快速失败 429，一个上游请求都不发）。
+        import wb_settings
+        real_hold = wb_settings.restriction_hold_enabled
+        wb_settings.restriction_hold_enabled = lambda d: True
+        first = make_account("a2")
+        second = make_account("b2")
+        P.POOL = StubPool([first, second])
+        upstream = ScriptedUpstream([http_error(403, RESTRICT_BODY),
+                                     http_error(403, RESTRICT_BODY)])
+        real_urlopen = wb_accounts.urlopen
+        wb_accounts.urlopen = upstream
+        try:
+            for _ in range(2):
+                with self.assertRaises(P.ContentRejected):
+                    P.open_upstream(dict(PAYLOAD), target_realm="intl")
+            with self.assertRaises(P.RateLimited):
+                P.open_upstream(dict(PAYLOAD), target_realm="intl")
+            self.assertEqual(len(upstream.calls), 2)
+        finally:
+            wb_accounts.urlopen = real_urlopen
+            wb_settings.restriction_hold_enabled = real_hold
+
     def test_content_403_keeps_its_old_path(self):
         a = make_account("c1")
         b = make_account("c2")
