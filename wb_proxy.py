@@ -12860,6 +12860,26 @@ class RateLimited(Exception):
         super().__init__("upstream rate limit: %s" % (self.detail[:200] or "429"))
 
 
+class ChannelBlocked(Exception):
+    """Upstream channel verification blocked this request (400 / code 11-128).
+
+    全池换号重试后仍被拦才走到这里。与 403 内容审核同理：不是账号的错，重试
+    通常能过——这个异常只说明「这一轮把池子里的号都试过了」，客户端拿到它
+    重发即可。保留上游信封（code 400 + 11-128 正文）以便客户端展示原话。
+    """
+
+    def __init__(self, http_error=None, detail=""):
+        self.http_error = http_error
+        self.detail = detail or ""
+        super().__init__(
+            "upstream channel verification blocked this request (400 11-128) "
+            "after trying every usable account")
+
+    @property
+    def code(self):
+        return 400
+
+
 def gateway_hint(status, message):
     """A gateway-side note that sits beside the raw upstream message.
 
@@ -13197,6 +13217,13 @@ def rate_limit_is_soft_shape(detail):
 CAP_LIMIT_CODE = 6004
 
 
+# 渠道校验拦截（400 11-128）重试的整池重轮上限。拦截有抖动、重发常过，但
+# 一轮打满整个池子还全拦的话，多半是请求形状本身被针对了——再多轮也只是烧
+# 上游，3 轮（每轮间隔 1/2/3s）是「重试够多」与「别把拦截烧成压测」的折中。
+CHANNEL_BLOCK_ROUNDS = 3
+
+
+
 def rate_limit_is_cap(detail):
     """True only for the upstream's quota-cap answer (code 6004).
 
@@ -13345,6 +13372,35 @@ def restriction_is_account_level(detail):
         return True
     lowered = detail.lower()
     return any(marker in lowered for marker in _RESTRICTION_403_MARKERS)
+
+
+# 上游渠道校验拦截（HTTP 400, code 11-128「Illegal API invocation from an
+# unapproved channel」）。它不是账号的错，也不是内容的错：拦截发生在请求形状
+# / 会话头族 / 指纹层面，换一个账号再发同样的请求一样可能被拦，但**重发一次**
+# 常常就过——上游的拦截本身有抖动（同一会话前一轮刚成功）。所以处置是换号 +
+# 重试，绝不把 400 原样抛给客户端——agent 收到 400 会直接终止整轮任务，损失
+# 远大于多试几个号。
+_CHANNEL_BLOCK_CODE_RE = re.compile(r'"code"\s*:\s*"?11-128"?')
+_CHANNEL_BLOCK_MARKERS = (
+    "illegal api invocation",
+    "unapproved channel",
+    "没通过渠道校验",
+    "请求被拦截",
+)
+
+
+def channel_block_is_11_128(detail):
+    """True when a 400 body is the upstream channel-verification block.
+
+    与 restriction_is_account_level 同款的宽容判定：code 与 en 文本任一命中
+    即可，短截断的正文也保得住 code。
+    """
+    if not detail:
+        return False
+    if _CHANNEL_BLOCK_CODE_RE.search(detail):
+        return True
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _CHANNEL_BLOCK_MARKERS)
 
 
 def _unescape_body(detail):
@@ -13590,6 +13646,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     last_429 = None
     last_429_detail = ""
     last_403_detail = ""
+    last_400_detail = ""
     transient_hits = 0
     degraded_retried = False
     # 一次请求里因为 11140 换过的号数：默认 0，即第一个号被限制就停手。
@@ -13597,6 +13654,10 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 本机断网的次数：这一轮里只要出现过，最终报错就按「网络不可用」报，不按
     # 「上游不稳」报——两者的处置完全相反（去查本机网络 vs 去查账号/上游）。
     local_net_hits = 0
+    # 渠道校验拦截（400 11-128）的次数：只用于日志与短退避升级，不记账。
+    channel_block_hits = 0
+    # 整池重轮的轮数（上限 CHANNEL_BLOCK_ROUNDS）。
+    channel_block_rounds = 0
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
     auto_switch = (auto_switch_product_enabled()
@@ -13620,8 +13681,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             egress_wait[key] = wb_egress.note_transient(key)
         return egress_wait[key]
 
-    max_attempts = (1 if pinned is not None else
-                    max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0))
+    # 渠道拦截重轮时同一池子会被再挑 CHANNEL_BLOCK_ROUNDS 轮，attempt 预算
+    # 按这个上限放宽，别让重轮在 range() 上被截断。
+    max_attempts = ((1 if pinned is not None else
+                     (max(2, total) + 1) * (1 + CHANNEL_BLOCK_ROUNDS))
+                    + (MAX_PRODUCT_SWITCHES if auto_switch else 0))
     # 官方 VSCode 扩展的 X-Conversation-ID 是 32hex、会话稳定；网关没有会话
     # 映射，至少保证同一次 open_upstream（含换号重试）里是同一个 id。桌面端 /
     # CLI 分支保持原行为（每次尝试各自新生成带连字符的 UUID），不受影响。
@@ -13643,6 +13707,19 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             if transient_hits and _attempt < max_attempts - 1:
                 tried.clear()
                 time.sleep(min(1.5 * transient_hits, 3.0))
+                continue
+            # 渠道拦截（11-128）是上游的抖动，换号一轮全被拦不代表这一轮请求
+            # 就该死：整池重轮，最多 CHANNEL_BLOCK_ROUNDS 轮，间隔随轮次拉长。
+            # 上限卡死总时长（~7s 级），绝不无限打转；耗尽后走最终报错。
+            if channel_block_hits and _attempt < max_attempts - 1 \
+                    and channel_block_rounds < CHANNEL_BLOCK_ROUNDS:
+                channel_block_rounds += 1
+                tried.clear()
+                wait = min(1.0 * channel_block_rounds, 3.0)
+                log("channel block (11-128): pool exhausted round %d/%d, "
+                    "re-rolling after %.1fs"
+                    % (channel_block_rounds, CHANNEL_BLOCK_ROUNDS, wait))
+                time.sleep(wait)
                 continue
             break
         if account.realm != realm:
@@ -13848,6 +13925,29 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     POOL.affinity.demote(session_key, account.uid)
                 last_error = exc
                 continue
+            if exc.code == 400:
+                try:
+                    detail = exc.read(600).decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                # 渠道校验拦截（code 11-128）不是账号的错：请求形状/会话头/
+                # 指纹层面的拦截，重发一次常常就过。换号重试，不记账也不冷
+                # 却——把它记成账号失败只会让健康账号被无意义地轮流关掉；
+                # 也绝不把 400 抛给客户端——agent 收到 400 会终止整轮任务。
+                if channel_block_is_11_128(detail):
+                    if session_key and POOL:
+                        POOL.affinity.demote(session_key, account.uid)
+                    channel_block_hits += 1
+                    log("account %s: upstream channel block (400 11-128) for "
+                        "'%s', rotating (hit #%d)"
+                        % (account.uid[:8], model, channel_block_hits))
+                    last_error = exc
+                    last_400_detail = detail
+                    time.sleep(min(0.5 * channel_block_hits, 2.0))
+                    continue
+                # 其余 400 是真请求错误（参数/消息形状），换号也不会好：原样
+                # 交给客户端，别把重试烧在注定失败的请求上。
+                raise
             if exc.code == 401:
                 if session_key and POOL:
                     POOL.affinity.demote(session_key, account.uid)
@@ -14000,6 +14100,13 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             raise exc
         if last_403_detail:
             exc = ContentRejected(last_error, last_403_detail)
+            exc.account_uid = last_uid
+            raise exc
+        if last_400_detail and channel_block_is_11_128(last_400_detail):
+            # 全池都试过仍被渠道校验拦截：包装成 ChannelBlocked 交给客户端。
+            # 直接 raise last_error 的话客户端只看到裸 400 正文，分不清「请求
+            # 写错了」与「拦截抖动，重发就好」。
+            exc = ChannelBlocked(last_error, last_400_detail)
             exc.account_uid = last_uid
             raise exc
         raise last_error

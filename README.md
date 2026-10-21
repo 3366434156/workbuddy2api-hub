@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 180 个套件：134 个 Python + 46 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 181 个套件：135 个 Python + 46 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -435,6 +435,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- 网关：上游渠道校验拦截（400 / code 11-128「请求被拦截」）改为换号重试：不记账、不冷却，全池被拦时整池重轮（最多 3 轮，间隔 1/2/3s），耗尽才以 400 交还客户端——不再因为一次拦截抖动直接终止 agent 整轮任务。
 - 面板：网关页「积分消耗」卡片副行增加「今日 X 积分」（按当前视图区域统计当日消耗，取 `/usage?range=today`，失败时该行不显示）；数据看板「用量明细 → 按模型」增加「积分」列，可直接比较各模型在当前区间消耗的积分（与既有「花费」列并排，沿用同一张表）。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.16，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
