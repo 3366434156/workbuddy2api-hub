@@ -79,6 +79,8 @@ class BatchTestTests(unittest.TestCase):
         calls = {"n": 0}
         fake = types.SimpleNamespace(
             _json=lambda code, obj: obj,
+            # test-all 的返回走 _json_panel（昵称脱敏），与生产一致。
+            _json_panel=lambda code, obj: obj,
         )
 
         def next_result(account, model, timeout=30):
@@ -171,6 +173,7 @@ class BatchTestTests(unittest.TestCase):
 
         fake = types.SimpleNamespace(
             _json=lambda code, obj: obj,
+            _json_panel=lambda code, obj: obj,
         )
         old_probe = P.probe_account
         P.probe_account = probe_by_product

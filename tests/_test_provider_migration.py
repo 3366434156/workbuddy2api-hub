@@ -25,10 +25,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wb_agents as A
 
 
-def apply_dsh_patch(home, label, model=None):
-    """对隔离 home 里的 DSH 补丁层跑一次 plan（不落盘，返回文件内容）。"""
+def apply_dsh_patch(home, label, model=None, patch_text=None):
+    """对隔离 home 里的 DSH 补丁层跑一次 plan（不落盘，返回文件内容）。
+
+    上游语义：只写**已存在**的补丁文件（绝不新建空档案），无补丁时回落
+    settings.yaml。测试要打补丁层就先放一个文件进去。
+    """
     profiles = os.path.join(home, ".dsh", "profiles", "desktop")
     os.makedirs(profiles, exist_ok=True)
+    if patch_text is not None:
+        with open(os.path.join(profiles, "cordis.patch.yml"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(patch_text)
     return A.plan("dsh", "http://127.0.0.1:8788", "sk-test", home=home,
                   model=model, provider_label=label)
 
@@ -59,7 +67,7 @@ class ChineseNamesTests(unittest.TestCase):
                 ("cn", "WB代理-国内版", "wb-proxy-cn", "WB_PROXY_API_KEY_CN"),
                 ("intl", "WB代理-国际版", "wb-proxy-intl",
                  "WB_PROXY_API_KEY_INTL")):
-            r = apply_dsh_patch(home, label)
+            r = apply_dsh_patch(home, label, patch_text="[]\n")
             patch = next(f for f in r["files"]
                          if f["path"].endswith("cordis.patch.yml"))
             self.assertIn("displayName: " + want, patch["content"])
@@ -68,7 +76,7 @@ class ChineseNamesTests(unittest.TestCase):
 
     def test_unscoped_name(self):
         home = tempfile.mkdtemp()
-        r = apply_dsh_patch(home, None)
+        r = apply_dsh_patch(home, None, patch_text="[]\n")
         patch = next(f for f in r["files"]
                      if f["path"].endswith("cordis.patch.yml"))
         self.assertIn("displayName: WB代理", patch["content"])
@@ -77,7 +85,7 @@ class ChineseNamesTests(unittest.TestCase):
 
     def test_custom_label_falls_back(self):
         home = tempfile.mkdtemp()
-        r = apply_dsh_patch(home, "lab")
+        r = apply_dsh_patch(home, "lab", patch_text="[]\n")
         patch = next(f for f in r["files"]
                      if f["path"].endswith("cordis.patch.yml"))
         self.assertIn("displayName: WB代理-lab", patch["content"])
@@ -114,7 +122,7 @@ class DshPatchMigrationTests(unittest.TestCase):
     def test_default_model_follows_new_provider(self):
         self._apply("cn")
         text = self.read()
-        self.assertIn("    provider: wb-proxy-cn", text,
+        self.assertIn('provider: "wb-proxy-cn"', text,
                       "agent-default-model 不能再指着已删除的 wb-proxy")
 
     def test_no_removal_when_applying_unscoped(self):

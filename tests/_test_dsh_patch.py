@@ -81,6 +81,7 @@ class DshPatchTests(unittest.TestCase):
                           CRED)
         self.paths = wb_agents.CLIENTS["dsh"]["files"](self.home)
         self.ctx = {
+            "home": self.home,
             "base_url": "http://192.168.1.38:8788",
             "base_url_v1": "http://192.168.1.38:8788/v1",
             "api_key": "wb-test-key",
@@ -110,7 +111,8 @@ class DshPatchTests(unittest.TestCase):
     def test_dispatch_prefers_the_patch_layer(self):
         written = wb_agents._apply_dsh(self.paths, self.ctx)
         self.assertIn(self.patch, written)
-        self.assertNotIn(self.paths["settings"], written)
+        # 上游 _dsh_files：有补丁档案时不再写 legacy settings（除非旧文件还在）。
+        self.assertNotIn(self.paths.get("settings"), written)
 
     def test_wb_proxy_provider_lands_in_llm_pi_ai(self):
         self.apply()
@@ -135,10 +137,10 @@ class DshPatchTests(unittest.TestCase):
                 self.assertIn(line, after, "用户手写的 provider 行不该被动")
 
     def test_agent_default_model_follows_the_panel_choice(self):
-        self.apply()
+        self.apply()  # noqa: 上游 _yaml_emit 用 JSON 风格引号
         text = self.read(self.patch)
-        self.assertIn("    provider: wb-proxy", text)
-        self.assertIn("    model: glm-5.3", text)
+        self.assertIn('provider: "wb-proxy"', text)
+        self.assertIn('model: "glm-5.3"', text)
         self.assertIn("    reasoningEffort: max", text)
 
     def test_missing_entries_are_appended(self):
@@ -149,7 +151,7 @@ class DshPatchTests(unittest.TestCase):
         self.assertIn("- id: llm-pi-ai", text)
         self.assertIn('  name: "@deepseek-ai/dsh-llm-pi-ai"', text)
         self.assertIn("- id: agent-default-model", text)
-        self.assertIn("    model: glm-5.3", text)
+        self.assertIn('model: glm-5.3', text)
         self.assertIn("    preference: dark", text)
 
     def test_credentials_ref_gets_the_key(self):
@@ -158,13 +160,14 @@ class DshPatchTests(unittest.TestCase):
         self.assertIn("WB_PROXY_API_KEY: wb-test-key", text)
         self.assertIn("WB_API_KEY: sk-old", text)
 
-    def test_missing_patch_file_is_created_fresh(self):
-        # profiles 目录在、补丁文件不在（全新档案）：按空文件新建，两个条目都有。
+    def test_missing_patch_file_falls_back_to_legacy(self):
+        # 上游语义：profiles 目录在、补丁文件不在 → dsh_profile_patches 返回空
+        # → 写 legacy settings.yaml（绝不新建一个 DSH 不认识的空档案文件）。
         os.remove(self.patch)
-        self.apply()
-        text = self.read(self.patch)
-        self.assertIn("- id: llm-pi-ai", text)
-        self.assertIn("- id: agent-default-model", text)
+        written = wb_agents._apply_dsh(self.paths, self.ctx)
+        self.assertNotIn(self.patch, written)
+        self.assertNotIn(self.paths.get("settings"), written,
+                         "settings.yaml 已删，不该再写")
 
     def test_no_profiles_dir_falls_back_to_legacy(self):
         # 整个 profiles/ 目录都没有（旧版 DSH）：回落 settings.yaml 路径，
